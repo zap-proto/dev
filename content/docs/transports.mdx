@@ -238,6 +238,41 @@ server := zap.NewServer(
 client, err := zap.Dial("wss://example.com/rpc")
 ```
 
+## ZAP in the browser (WASM)
+
+For browser clients you don't need a separate runtime — pull in [`@zap-proto/wasm`](https://www.npmjs.com/package/@zap-proto/wasm), the encoder + transport compiled to WebAssembly. It speaks `wss://` to the server unchanged; from the application's point of view it's the same `Zap` class you'd use in Node.
+
+```ts
+import { Zap } from '@zap-proto/wasm'
+
+const client = await Zap.connect('wss://api.example.com/rpc')
+const tools  = await client.listTools()
+```
+
+Bundle size is ~210 KiB gzipped (full encoder + X-Wing KEM); ~64 KiB if you tree-shake to schema-only.
+
+## ZAP at the edge (Workers / Deno / Bun)
+
+The WASM build runs on Cloudflare Workers, Deno, Bun, and any V8-isolate runtime. Use it to terminate ZAP at the edge:
+
+```ts
+// Cloudflare Worker
+import { Zap } from '@zap-proto/wasm'
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const upstream = await Zap.connect(env.ZAP_UPSTREAM)
+    const result   = await upstream.callTool({
+      name: 'lookup',
+      args: JSON.stringify(await request.json()),
+    })
+    return Response.json(JSON.parse(result.content))
+  }
+}
+```
+
+This is the **cloudflare-esque update path**: deploy a tiny worker that brokers ZAP between browser/REST clients and your origin ZAP services. The worker holds the persistent KEM-authenticated ZAP connection (across cold starts via durable objects / KV); browsers see plain `fetch`. Latency penalty is one extra hop, but the worker can fan out to many origins, cache reads, and serve geographically-near clients without changing the origin.
+
 ## Multi-Transport Server
 
 Run a single server on multiple transports:

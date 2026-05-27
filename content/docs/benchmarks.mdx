@@ -123,6 +123,36 @@ A sample run from this dev machine (Apple M-series, macOS aarch64, `quick` prese
 
 Object-mode wins because there's no encode/decode step — the in-memory layout *is* the wire layout. Pipe is slowest because it crosses a process boundary. Packed adds compute for compression in exchange for fewer bytes on the wire. The shape of these numbers should hold across machines; absolute throughput will swing with CPU and cache size.
 
+### Parallel saturation
+
+`benchmark/saturate.sh` runs N worker copies of the encoder workload in parallel and computes **real** parallel efficiency against a recorded single-worker baseline. Honest measurement, not aggregate-divided-by-per-core (which is tautological).
+
+```bash
+# 1. record the single-worker baseline
+PRESET=full bash ./benchmark/saturate.sh baseline
+
+# 2. saturate with N=ncpu workers (default), get real speedup
+PRESET=full bash ./benchmark/saturate.sh
+
+# 3. eyeball CPU usage during the run
+tail bench-results/saturate-*/cpu.log
+```
+
+Sample numbers on the dev machine (Apple M1 Max, 10 cores: 8 P + 2 E):
+
+```
+single-worker      : 6.003s for 2,000,000 iters = 333,183 ops/s
+10-worker wall     : 11.46s
+aggregate ops/s    : 1,745,201
+REAL speedup       : 5.24× (= single × N / wall)
+effective cores    : 5.24 of 10
+parallel efficiency: 52%
+```
+
+52% efficiency on a 10-core M1 Max is normal: macOS QoS scheduler defaults subprocesses to efficiency cores, the system allocator serializes across processes, and unified memory bandwidth is shared. The CPU sampler captures the actual peak (~557% in `ps -o %cpu`, ≈5.5 cores busy), which matches the speedup math.
+
+If you submit a `bench-results/` JSON from a different machine, the matching `saturate-*/cpu.log` is welcome too — it's the proof-of-life that the workers actually ran in parallel.
+
 ## Methodology
 
 - Single host, loopback (`127.0.0.1`)

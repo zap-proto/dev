@@ -8,14 +8,14 @@
     "architecture",
     "protocol",
     "transports",
+    "post-quantum",
     "gateway",
     "consensus",
-    "---SDKs---",
     "sdks",
-    "---Protocols over ZAP---",
     "protocols",
     "---Reference---",
     "api",
-    "benchmarks"
+    "benchmarks",
+    "ecosystem"
   ]
 }

@@ -46,10 +46,10 @@ export default function HomePage() {
           <h2 className="text-2xl font-bold text-center mb-10">Where to start</h2>
           <div className="grid gap-6 md:grid-cols-3">
             <DocCard icon={Terminal} title="Quick start" body="Install zapc + a binding, write a schema, send your first frame in 60 seconds." href="/docs/quick-start" />
-            <DocCard icon={Code2} title="Schema language" body="Whitespace-significant syntax. Structs, unions, lists, interfaces. Field ordinals inferred." href="/docs/schema" />
-            <DocCard icon={Package} title="Language bindings" body="Go, Rust, Python, TypeScript, C, C++, Java, Erlang, more." href="/docs/bindings" />
-            <DocCard icon={BookOpen} title="Sub-protocols" body="zap-http, zap-ws, zap-fix, zap-rns, zap-mcp, zap-acp, zap-a2a." href="/docs/sub-protocols" />
-            <DocCard icon={GitBranch} title="Wire format" body="Cap'n Proto-derived bytes; X-Wing/Z-Wing PQ KEM at the transport." href="/docs/wire" />
+            <DocCard icon={Code2} title="Native ZAP RPC" body="Schema → codegen → server + client. Capability-based, no bearer tokens." href="/docs/protocols/native" />
+            <DocCard icon={Package} title="Language SDKs" body="Go, Rust, Python, TypeScript, C, C++, Java, C#, Erlang, Haskell, OCaml." href="/docs/sdks" />
+            <DocCard icon={BookOpen} title="Protocols over ZAP" body="HTTP, MCP, A2A, ACP, RNS, FIX, WS — each as its own channel." href="/docs/protocols" />
+            <DocCard icon={GitBranch} title="Post-quantum" body="X-Wing / Z-Wing hybrid KEM at the transport. ML-DSA + Ed25519 signatures." href="/docs/post-quantum" />
             <DocCard icon={BookOpen} title="Papers & proofs" body="Formal results: composability theorem, transport-vs-JWT advantage bounds, Z-Wing IND-CCA2-AKE." href="https://github.com/zap-proto/papers" />
           </div>
         </div>

@@ -49,7 +49,7 @@ export default function HomePage() {
             <DocCard icon={Code2} title="Native ZAP RPC" body="Schema → codegen → server + client. Capability-based, no bearer tokens." href="/docs/protocols/native" />
             <DocCard icon={Package} title="Language SDKs" body="Go, Rust, Python, TypeScript, C, C++, Java, C#, Erlang, Haskell, OCaml." href="/docs/sdks" />
             <DocCard icon={BookOpen} title="Protocols over ZAP" body="HTTP, MCP, A2A, ACP, RNS, FIX, WS — each as its own channel." href="/docs/protocols" />
-            <DocCard icon={GitBranch} title="Post-quantum" body="X-Wing / Z-Wing hybrid KEM at the transport. ML-DSA + Ed25519 signatures." href="/docs/post-quantum" />
+            <DocCard icon={GitBranch} title="Post-quantum" body="Z-Wing channel — IETF X-Wing KEM + hybrid Ed25519/ML-DSA-65 identity. One construction, no negotiation." href="/docs/post-quantum" />
             <DocCard icon={BookOpen} title="Papers & proofs" body="Formal results: composability theorem, transport-vs-JWT advantage bounds, Z-Wing IND-CCA2-AKE." href="https://github.com/zap-proto/papers" />
           </div>
         </div>

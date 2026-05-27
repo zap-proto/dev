@@ -1,127 +1,153 @@
 ---
 title: Post-Quantum
-description: Hybrid X-Wing / Z-Wing KEM at the transport, ML-DSA + Ed25519 signatures, PQ-ready by default.
+description: Z-Wing — the canonical PQ secure channel for ZAP — built on IETF X-Wing KEM + hybrid Ed25519/ML-DSA-65 identities.
 ---
 
 # Post-Quantum
 
-ZAP is PQ-ready by default. Every transport handshake runs a **hybrid KEM** that's secure as long as *either* the classical primitive (X25519) *or* the lattice primitive (ML-KEM-768) is unbroken. You don't need to opt in; you need to opt *out* if you want classical-only.
+ZAP runs unchanged over **Z-Wing**, the canonical post-quantum secure channel for the Lux network. Z-Wing is **one construction**, not a menu of suites — two endpoints either speak Z-Wing v1 or they don't talk. No negotiation, no downgrade, no cipher suite ID byte to fingerprint.
 
-## The three suites
+## What Z-Wing is
 
-| Suite | KEM | Signature | When |
-|---|---|---|---|
-| Classical | X25519 | Ed25519 | Disabled by default in 1.0; available for low-resource embedded |
-| **X-Wing** (default) | X25519 + ML-KEM-768 | Ed25519 + ML-DSA-65 | Default for every new connection from ZAP 1.0 |
-| **Z-Wing** | X25519 + ML-KEM-1024 + Classic McEliece | Ed25519 + ML-DSA-87 + SLH-DSA | Belt-and-suspenders, opt-in via `WithPQSuite(zap.SuiteZWing)` |
+Z-Wing is a *composition*, not a new cryptographic primitive. It bolts together vetted pieces and exposes a `net.Conn` so application protocols (e.g. ZAP RPC) run unchanged.
 
-### X-Wing (the IETF hybrid)
-
-X-Wing is the **IETF-draft hybrid KEM** — `X25519` + `ML-KEM-768`, combined with a secure-by-construction KDF. The combined shared secret is secure as long as *one* of the two is. This is the same construction Anthropic, Cloudflare, and Apple's iMessage PQ3 have converged on for client-server key agreement.
-
-ZAP's wire spec pins X-Wing's exact KDF and label string, so two ZAP implementations interop bit-for-bit regardless of which crypto library they vendor.
-
-```go
-import zap "github.com/zap-proto/go"
-
-// X-Wing is the default — no flag needed
-client, _ := zap.Dial(ctx, "zap://service.example:9000")
-
-// Explicit:
-client, _ := zap.Dial(ctx, "zap://service.example:9000",
-    zap.WithPQSuite(zap.SuiteXWing),
-)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Z-Wing v1                                                       │
+│                                                                 │
+│   KEM        IETF X-Wing  (X25519 + ML-KEM-768, SHA3-256        │
+│              combiner — bit-for-bit interop with any            │
+│              draft-connolly-cfrg-xwing-kem peer)                │
+│   Identity   Ed25519 + ML-DSA-65 hybrid signatures              │
+│              (both must verify; either-or compromise still      │
+│              fails forgery)                                     │
+│   AEAD       ChaCha20-Poly1305, sequence-numbered nonces        │
+│   Transport  any net.Conn (TCP today; RNS link in LP-9702)      │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Z-Wing (ZAP's belt-and-suspenders)
+The cryptography at the KEM layer is **real IETF X-Wing** byte-for-byte. The Lux value-add lives in the layers *above* the KEM — hybrid identity bound into the transcript, single canonical wire format, RNS-routed transport — not in forking the KEM itself.
 
-Z-Wing is **ZAP's own hybrid** for adversaries who don't trust *any* single PQ primitive. It triples up:
+Repo: [github.com/luxfi/zwing](https://github.com/luxfi/zwing).
 
-- `X25519` — classical, broken only by a CRQC
-- `ML-KEM-768` (or `ML-KEM-1024`) — lattice, NIST Round 4 winner
-- `Classic McEliece` — code-based, conservative choice with the longest analysis history
+## X-Wing vs. Z-Wing — they aren't competing suites
 
-Combined via the same X-Wing-style KDF, extended to three inputs. Secure as long as *any one of the three* primitives is.
+A common mix-up:
 
-Trade-off: handshakes are bigger (~1 MiB McEliece public key on first connect; cached after) and slower (~3-5 ms vs. X-Wing's ~0.6 ms on a modern x86). Worth it for archival traffic, court-grade audit logs, and roots-of-trust. Not for high-volume inner-loop RPC.
+- **X-Wing** is a **KEM primitive**. It is the IETF draft hybrid KEM: X25519 + ML-KEM-768 combined via SHA3-256 with a fixed label string. That's it — just the key exchange.
+- **Z-Wing** is the **full secure channel** that uses X-Wing as its KEM. Z-Wing adds identity binding (hybrid sigs into the handshake transcript), domain-separated channel keys (`lux.zwing.v1/i2r`, `/r2i`), AEAD record framing, and routing.
 
-```go
-client, _ := zap.Dial(ctx, "zap://service.example:9000",
-    zap.WithPQSuite(zap.SuiteZWing),
-)
+You don't pick "X-Wing" or "Z-Wing." You speak Z-Wing, which uses X-Wing.
+
+## Handshake (1-RTT)
+
+```
+Initiator → Responder   HandshakeInit
+    [2 BE idLen][IdentityPublic bytes][2 BE sigLen][hybrid signature]
+
+Responder → Initiator   HandshakeResponse
+    [XWingCiphertextSize bytes: ML-KEM ct || X25519 ephemeral pk]
+    [2 BE encLen][AEAD-sealed responder identity + signature]
 ```
 
-There's a formal proof in [zap-proto/papers](https://github.com/zap-proto/papers) — *Z-Wing IND-CCA2-AKE under triple-hardness assumptions* — that bounds Z-Wing's combined advantage by the minimum of the three component advantages.
+- The initiator signs `(label ‖ IdentityPublic)` so a passive observer can't lift the public identity onto another protocol.
+- The responder signs the **transcript hash** covering the initiator's public identity AND the X-Wing ciphertext, binding the signature to the session.
+- The responder's identity is encrypted under an HKDF-derived key from the X-Wing shared secret, so passive observers don't learn the responder's long-term identity.
+- The responder is the **encapsulator** (it sends `ct_X`). The initiator is the **recipient** of the encapsulation.
 
-## Signatures
+`IdentityPublic` is fixed-layout, 3200 bytes total:
 
-Identity signatures (peer DIDs, capability tokens, attestations) use a hybrid:
-
-- **Default**: Ed25519 + ML-DSA-65 (NIST Round 4 Dilithium2, FIPS 204)
-- **Z-Wing**: Ed25519 + ML-DSA-87 + SLH-DSA-SHA2-256s (FIPS 205, stateless hash-based)
-
-Both signatures must verify; failure of either rejects the message. Mirror of Bouncy Castle's `Composite-ML-DSA`.
-
-```go
-identity := zap.GenerateIdentity()  // hybrid Ed25519 + ML-DSA-65 by default
-
-// Z-Wing identity with hash-based fallback
-identity := zap.GenerateIdentity(zap.WithSuite(zap.SuiteZWing))
+```
+[Ed25519 pk: 32][ML-DSA-65 pk: 1952][X-Wing pk: 1216]
+                                    (= ML-KEM-768 pk 1184 ‖ X25519 pk 32)
 ```
 
-## How it composes with capabilities
+## X-Wing combiner (IETF spec, exact)
 
-Capability tokens (the references you return from a [native ZAP RPC](/docs/protocols/native) method) are signed by the issuing peer's identity. When you upgrade from classical to X-Wing or X-Wing to Z-Wing, *existing capability tokens stay valid* because they're signed under your identity's lifetime hybrid key — a quantum-capable adversary can't forge them, even retroactively.
+```
+shared_secret = SHA3-256( "\./" || "X-Wing" || ss_M || ss_X || ct_X || pk_X )
+```
 
-## What's standardized vs. ZAP-specific
-
-| | Standardized | ZAP-specific |
+| Input | Bytes | Source |
 |---|---|---|
-| X-Wing KEM | IETF draft-connolly-cfrg-xwing-kem-06 | bit-for-bit |
-| ML-KEM | NIST FIPS 203 | bit-for-bit |
-| ML-DSA | NIST FIPS 204 | bit-for-bit |
-| SLH-DSA | NIST FIPS 205 | bit-for-bit |
-| Classic McEliece | NIST Round 4 | bit-for-bit |
-| **Z-Wing combiner** | — | ZAP-specific (paper in [zap-proto/papers](https://github.com/zap-proto/papers)) |
-| Hybrid signature | Composite-ML-DSA (draft) | bit-for-bit |
-| Transcript binding | TLS 1.3-style label tree | adapted for ZAP framing |
+| `"\./"` | 3 | label prefix |
+| `"X-Wing"` | 6 | ASCII protocol name (IETF spec) |
+| `ss_M` | 32 | ML-KEM-768 shared secret |
+| `ss_X` | 32 | X25519 shared secret |
+| `ct_X` | 32 | X25519 ephemeral pk from encapsulator |
+| `pk_X` | 32 | X25519 static pk of recipient |
 
-ZAP doesn't invent new crypto — it composes vetted primitives in a published, auditable way. Every choice is replaceable: when ML-KEM is replaced by a future NIST winner, X-Wing-N rolls forward without breaking the wire format.
+The label is `"X-Wing"`, not `"Z-Wing"`. The point of using the IETF KEM is to interop with any X-Wing peer; rebranding the combiner would break interop and add zero security.
 
-## Migration ladder
+## Channel keys
+
+After the handshake:
 
 ```
-classical-only        →   X-Wing             →   Z-Wing
-(legacy, opt-in)          (default 1.0)          (high-assurance)
+keyI2R = HKDF-SHA256(shared, "lux.zwing.v1/i2r", 32)
+keyR2I = HKDF-SHA256(shared, "lux.zwing.v1/r2i", 32)
 ```
 
-You move forward by setting a per-service minimum suite:
+Each direction gets its own ChaCha20-Poly1305 key. Nonce = 12 bytes: high 4 zero, low 8 are the big-endian sequence counter. A 64-bit counter lasts 5.8e11 years at 1 record/ns; exhausting it returns `ErrSequenceExhausted`.
+
+The `lux.zwing.v1` HKDF info string is where the Lux value-add lives — domain-separated from any other system that might also use IETF X-Wing.
+
+Forward secrecy: the X25519 ephemeral inside X-Wing. The ephemeral private key and intermediate `ss_M` / `ss_X` are zeroed after combination.
+
+## Using Z-Wing under ZAP
+
+ZAP RPC runs on top of Z-Wing's `net.Conn` — any existing ZAP service gets PQ on the wire by swapping the dialer:
 
 ```go
-srv := zap.NewServer(
-    zap.WithAddr("zap://0.0.0.0:9000"),
-    zap.WithMinSuite(zap.SuiteXWing),  // refuse classical-only peers
+import (
+    zap   "github.com/zap-proto/go"
+    zwing "github.com/luxfi/zwing"
 )
+
+id, _ := zwing.GenerateIdentity()
+raw, _ := zwing.Dial(ctx, "host:9999", &zwing.Config{LocalIdentity: id})
+zapConn := zap.NewConn(raw, nil)
+// existing ZAP code unchanged
 ```
 
-Old clients see a clear handshake-rejection error referencing the required suite. Roll out: turn on X-Wing-or-better in observation mode (log mismatches), then enforce.
+Server:
 
-## Per-language status
+```go
+ln, _ := zwing.Listen(":9999", &zwing.Config{LocalIdentity: id})
+for {
+    raw, _ := ln.Accept()
+    go handle(zap.NewConn(raw, nil))
+}
+```
 
-| SDK | X-Wing | Z-Wing | Notes |
-|---|---|---|---|
-| Rust ([zap-proto/rust](https://github.com/zap-proto/rust)) | ✅ | ✅ | Reference implementation |
-| Go ([zap-proto/go](https://github.com/zap-proto/go)) | ✅ | ✅ | Uses CIRCL + cloudflare/circl |
-| Python ([zap-proto/py](https://github.com/zap-proto/py)) | ✅ | ⏳ | X-Wing via liboqs; Z-Wing in 1.1 |
-| TypeScript ([zap-proto/ts](https://github.com/zap-proto/ts)) | ✅ | ⏳ | WASM-only for Z-Wing (1.1) |
-| C++ ([zap-proto/cpp](https://github.com/zap-proto/cpp)) | ✅ | ✅ | liboqs-cpp + libsodium |
-| Java ([zap-proto/java](https://github.com/zap-proto/java)) | ✅ | ⏳ | Bouncy Castle 1.78+ |
-| C# ([zap-proto/cs](https://github.com/zap-proto/cs)) | ✅ | ⏳ | BC.NET |
+Default port: **TCP 9999** (canonical Lux ZAP port).
+
+## What Z-Wing is *not*
+
+- **Not a competitor to X-Wing.** It uses X-Wing.
+- **Not a triple-hybrid with Classic McEliece.** Just ML-KEM-768 + X25519 via the IETF combiner.
+- **Not a ZK / SNARK / P3Q channel.** P3Q is a separate Lux EVM precompile for ZK proof verification at the contract layer; Z-Wing is at the transport layer. Different concerns.
+- **Not configurable.** No cipher negotiation. One construction, take it or leave it.
+
+## Browser, edge, and Lux
+
+| Where | Path |
+|---|---|
+| Browser / WASM | [`@zap-proto/wasm`](https://www.npmjs.com/package/@zap-proto/wasm) speaks `wss://` to a server-side ZAP. The Z-Wing handshake terminates at the server (browsers can't dial raw TCP). For browser-edge clients you trust a TLS hop, then Z-Wing inside it. |
+| Cloudflare Worker / Deno / Bun | The WASM build runs in V8 isolates. Workers hold persistent Z-Wing connections to origin ZAP and serve `fetch()` from browsers. See [transports → ZAP at the edge](/docs/transports#zap-at-the-edge-workers--deno--bun). |
+| Lux network (validator-to-validator) | Native Z-Wing on TCP 9999 — production, mandatory PQ on every consensus path. |
+| Service-to-service inside a Lux cluster | Native Z-Wing — same as above, no TLS in front. |
+
+## Identity rotation
+
+Identities are hybrid keypairs (Ed25519 + ML-DSA-65). Z-Wing doesn't pin a single identity per host — you can rotate by handing a new `Config.LocalIdentity` to the next `Dial`/`Listen`. Capability tokens (returned from [native ZAP RPC](/docs/protocols/native) methods) are signed under your identity's hybrid sig, so a quantum-capable adversary can't forge them even retroactively.
 
 ## Further reading
 
-- [Wire spec](/docs/protocol) — exact handshake byte layout
-- [Architecture](/docs/architecture) — why hybrid by default
-- [zap-proto/papers](https://github.com/zap-proto/papers) — *Z-Wing IND-CCA2-AKE* proof
+- Repo: [luxfi/zwing](https://github.com/luxfi/zwing) — Go implementation, JS + Python bindings under `js/` and `py/`
 - IETF: [draft-connolly-cfrg-xwing-kem](https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/)
-- NIST: [FIPS 203 (ML-KEM)](https://csrc.nist.gov/pubs/fips/203/final), [FIPS 204 (ML-DSA)](https://csrc.nist.gov/pubs/fips/204/final), [FIPS 205 (SLH-DSA)](https://csrc.nist.gov/pubs/fips/205/final)
+- NIST: [FIPS 203 (ML-KEM)](https://csrc.nist.gov/pubs/fips/203/final), [FIPS 204 (ML-DSA)](https://csrc.nist.gov/pubs/fips/204/final)
+- Wire spec: [/docs/protocol](/docs/protocol)
+- Transport layer: [/docs/transports](/docs/transports)
+- Native ZAP RPC over Z-Wing: [/docs/protocols/native](/docs/protocols/native)

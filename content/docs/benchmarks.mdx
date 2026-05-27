@@ -78,7 +78,9 @@ Tweak the workloads in `bench_test.go`. Hardware will move the numbers; the **ra
 
 ### Rust harness (carsales / catrank / eval)
 
-The classic Cap'n-Proto-derived workload suite ported to the ZAP Rust SDK. Produces structured JSON for cross-machine comparison.
+The canonical workload suite — three workloads (carsales, catrank, eval), three modes (object / bytes / pipe), two compressions (none / packed), two scratch policies (reuse / no-reuse). 20 distinct measurements per run.
+
+The benchmark uses only the **`zap` crate** (the renamed runtime) and **`zapc` crate** (the renamed codegen). Schema files are `.zap`; pre-compiled `*_zap.rs` is committed in-tree so `cargo build -p benchmark` invokes **zero external schema tools**. `cargo tree -p benchmark` shows no `capnp` dependency anywhere.
 
 ```bash
 git clone https://github.com/zap-proto/rust

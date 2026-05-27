@@ -1,0 +1,88 @@
+---
+title: SDKs
+description: ZAP SDKs and language bindings — pick your language, install, generate code.
+---
+
+# SDKs
+
+ZAP ships first-class implementations for every major language. All implementations target byte-for-byte compatibility with the spec, share the same `.zap` schema language, and follow the same versioning.
+
+## Core SDKs
+
+| Language | Package | Repo | Status |
+|---|---|---|---|
+| TypeScript / JavaScript | `@zap-proto/zap` | [zap-proto/ts](https://github.com/zap-proto/ts) | stable |
+| Go | `github.com/zap-proto/go` | [zap-proto/go](https://github.com/zap-proto/go) | stable |
+| Python | `zap-proto` | [zap-proto/py](https://github.com/zap-proto/py) | stable |
+| Rust | `zap-proto` (crates.io) | [zap-proto/rust](https://github.com/zap-proto/rust) | stable |
+| C++ | — (cmake) | [zap-proto/cpp](https://github.com/zap-proto/cpp) | stable |
+| C++ core | — (cmake) | [zap-proto/cpp-core](https://github.com/zap-proto/cpp-core) | stable |
+| C | — (autotools) | [zap-proto/c](https://github.com/zap-proto/c) | stable |
+| .NET / C# | `ZapProto` (NuGet) | [zap-proto/cs](https://github.com/zap-proto/cs) | stable |
+| Java | `io.zap-proto:zap` | [zap-proto/java](https://github.com/zap-proto/java) | stable |
+| WebAssembly | `@zap-proto/wasm` | [zap-proto/zap-wasm](https://github.com/zap-proto/zap-wasm) | stable |
+
+## Community SDKs
+
+| Language | Repo | Status |
+|---|---|---|
+| OCaml | [zap-proto/ocaml](https://github.com/zap-proto/ocaml) | beta |
+| OCaml RPC | [zap-proto/ocaml-rpc](https://github.com/zap-proto/ocaml-rpc) | beta |
+| Haskell | [zap-proto/haskell](https://github.com/zap-proto/haskell) | beta |
+| Erlang | [zap-proto/erlang](https://github.com/zap-proto/erlang) | beta |
+| Scala | [zap-proto/scala](https://github.com/zap-proto/scala) | beta |
+| Lua | [zap-proto/lua](https://github.com/zap-proto/lua) | beta |
+| Ruby | [zap-proto/ruby](https://github.com/zap-proto/ruby) | beta |
+| Nim | [zap-proto/nim](https://github.com/zap-proto/nim) | beta |
+| D | [zap-proto/d](https://github.com/zap-proto/d) | beta |
+
+## Wire Encoders
+
+These are stand-alone wire codecs (no RPC layer) for embedding ZAP into other stacks.
+
+| Package | Repo |
+|---|---|
+| `@zap-proto/zap-es` (TS, Cap'n-Proto-style) | [zap-proto/zap-es](https://github.com/zap-proto/zap-es) |
+
+## Editor / IDE Plugins
+
+| Editor | Package | Repo |
+|---|---|---|
+| VS Code | [Marketplace](https://marketplace.visualstudio.com/items?itemName=zap-proto.zap) | [zap-proto/vscode](https://github.com/zap-proto/vscode) |
+| IntelliJ / JetBrains | — | [zap-proto/intellij](https://github.com/zap-proto/intellij) |
+| Vim / Neovim | — | [zap-proto/vim](https://github.com/zap-proto/vim) |
+| Sublime Text | — | [zap-proto/sublime](https://github.com/zap-proto/sublime) |
+| Shiki / TextMate / web syntax | [`@zap-proto/syntax`](https://www.npmjs.com/package/@zap-proto/syntax) | [zap-proto/syntax](https://github.com/zap-proto/syntax) |
+| Language Server | — | [zap-proto/lsp](https://github.com/zap-proto/lsp) |
+
+## Tools
+
+| Tool | Repo |
+|---|---|
+| Wireshark dissector | [zap-proto/wireshark](https://github.com/zap-proto/wireshark) |
+| Compiler-plugin test framework | [zap-proto/test](https://github.com/zap-proto/test) |
+| Logos & brand assets | [zap-proto/logo](https://github.com/zap-proto/logo) |
+
+## Protocols over ZAP
+
+ZAP carries higher-level protocols as channel implementations. Each is a separate package; pick the ones you need.
+
+| Protocol | Package | Repo |
+|---|---|---|
+| HTTP (net/http drop-in) | `github.com/zap-proto/http` | [zap-proto/http](https://github.com/zap-proto/http) |
+| MCP (Model Context Protocol) | `github.com/zap-proto/mcp` | [zap-proto/mcp](https://github.com/zap-proto/mcp) |
+| A2A (Agent-to-Agent) | `github.com/zap-proto/a2a` | [zap-proto/a2a](https://github.com/zap-proto/a2a) |
+| ACP (Agent Communication, FIPA-style) | `github.com/zap-proto/acp` | [zap-proto/acp](https://github.com/zap-proto/acp) |
+| RNS (Resource Name Service) | `github.com/zap-proto/rns` | [zap-proto/rns](https://github.com/zap-proto/rns) |
+| FIX 4.4 / 5.0 trading | `github.com/zap-proto/fix` | [zap-proto/fix](https://github.com/zap-proto/fix) |
+| WS (multi-stream pubsub) | `github.com/zap-proto/ws` | [zap-proto/ws](https://github.com/zap-proto/ws) |
+| Bench (HTTP perf harness) | `github.com/zap-proto/bench` | [zap-proto/bench](https://github.com/zap-proto/bench) |
+
+## Specification & Research
+
+| What | Repo |
+|---|---|
+| Wire spec (canonical) | [zap-proto/spec](https://github.com/zap-proto/spec) |
+| Papers (design + research) | [zap-proto/papers](https://github.com/zap-proto/papers) |
+| Formal proofs | [zap-proto/proofs](https://github.com/zap-proto/proofs) |
+| Benchmark suite | [zap-proto/benchmarks](https://github.com/zap-proto/benchmarks) |

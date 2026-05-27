@@ -10,7 +10,10 @@
     "transports",
     "gateway",
     "consensus",
+    "---SDKs---",
+    "sdks",
     "---Reference---",
-    "api"
+    "api",
+    "benchmarks"
   ]
 }

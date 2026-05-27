@@ -1,0 +1,9 @@
+{
+  "title": "Examples",
+  "pages": [
+    "index",
+    "pq-rns-roundtrip",
+    "multi-lang-conformance",
+    "capability-mailbox"
+  ]
+}

@@ -1,0 +1,96 @@
+---
+title: HTTP over ZAP
+description: Drop-in net/http replacement carried on the ZAP wire.
+---
+
+# HTTP over ZAP
+
+`zap-proto/http` is a drop-in replacement for Go's `net/http` that speaks the ZAP wire format. Existing `http.Handler` code compiles unchanged; the difference is zero-copy buffers end-to-end, mutual KEM auth at the transport, and 5-10× lower p99 vs. `net/http` on the same hardware (see [benchmarks](/docs/benchmarks)).
+
+## Install
+
+```bash
+go get github.com/zap-proto/http
+```
+
+## Server
+
+```go
+package main
+
+import (
+    "io"
+    "log"
+
+    zhttp "github.com/zap-proto/http"
+)
+
+func main() {
+    h := zhttp.NewServeMux()
+
+    h.HandleFunc("/hello", func(w zhttp.ResponseWriter, r *zhttp.Request) {
+        w.WriteHeader(200)
+        io.WriteString(w, "hello, "+r.URL.Path)
+    })
+
+    log.Fatal(zhttp.ListenAndServe(":9000", h))
+}
+```
+
+The signatures are intentionally identical to `net/http` — the only difference is the package import. `ResponseWriter` and `Request` are interfaces that wrap zero-copy ZAP buffers.
+
+## Client
+
+```go
+client := zhttp.DefaultClient
+resp, err := client.Get("zap://api.example.com/hello")
+if err != nil { log.Fatal(err) }
+defer resp.Body.Close()
+
+body, _ := io.ReadAll(resp.Body)
+fmt.Println(string(body))
+```
+
+## Middleware
+
+Standard pattern works:
+
+```go
+func auth(next zhttp.Handler) zhttp.Handler {
+    return zhttp.HandlerFunc(func(w zhttp.ResponseWriter, r *zhttp.Request) {
+        if r.PQIdentity() == nil {
+            zhttp.Error(w, "unauthorized", 401)
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+
+h.Handle("/private", auth(handler))
+```
+
+`r.PQIdentity()` returns the peer's KEM-bound identity — the auth happens at the ZAP transport, your handler doesn't issue/verify tokens.
+
+## Bridge to net/http
+
+Wrap an existing `http.Handler`:
+
+```go
+import (
+    nhttp "net/http"
+    zhttp "github.com/zap-proto/http"
+)
+
+var existing nhttp.Handler = setupRouter()  // your existing routes
+log.Fatal(zhttp.ListenAndServe(":9000", zhttp.FromNetHTTP(existing)))
+```
+
+## Performance
+
+See the [benchmark page](/docs/benchmarks) and [zap-proto/bench](https://github.com/zap-proto/bench) for the reproducible harness. Headline: 6.0× req/s, 19× lower p99 latency, 6.2× less RSS vs. `net/http` at 1k keep-alive connections.
+
+## Related
+
+- [zap-proto/http](https://github.com/zap-proto/http) — Go reference implementation
+- [zap-proto/bench](https://github.com/zap-proto/bench) — performance harness
+- [transports](/docs/transports) — wire-level framing detail

@@ -1,0 +1,104 @@
+---
+title: A2A over ZAP
+description: Google Agent-to-Agent protocol over ZAP — agent cards, tasks, artifacts.
+---
+
+# A2A over ZAP
+
+`zap-proto/a2a` carries Google's **Agent-to-Agent (A2A)** protocol on the ZAP wire. A2A is the cross-vendor agent-collaboration spec: agent cards advertise capabilities, tasks are issued and tracked, artifacts (files, messages, code) flow between agents.
+
+Running A2A over ZAP gives you:
+
+- **Trustworthy agent cards** — the publishing agent signs its own card with its KEM identity; consumers verify without a separate PKI.
+- **Provable task lineage** — every task transition is signed by the issuing agent. Disputes are settled by signature, not by audit log trust.
+- **Streaming-native artifacts** — large artifacts (vid, code, JSONL data) are zero-copy buffers, not gRPC-serialized blobs.
+
+## Install
+
+```bash
+go get github.com/zap-proto/a2a
+```
+
+## Publish an agent card
+
+```go
+package main
+
+import (
+    "log"
+
+    za2a "github.com/zap-proto/a2a"
+)
+
+func main() {
+    card := za2a.AgentCard{
+        Name:        "code-reviewer",
+        Description: "Reviews Go pull requests for correctness and security",
+        Skills: []za2a.Skill{
+            {ID: "review", Description: "Review a PR", Inputs: []string{"pr-url"}},
+        },
+        URL: "zap://reviewer.example:9200",
+    }
+
+    srv := za2a.NewServer(card)
+    srv.HandleTask("review", reviewTask)
+
+    log.Fatal(srv.ListenAndServe("zap://0.0.0.0:9200"))
+}
+
+func reviewTask(ctx context.Context, t *za2a.Task) error {
+    // ... fetch PR, run analysis, attach artifacts
+    t.AttachArtifact("review.md", reviewMarkdown)
+    return t.Complete()
+}
+```
+
+## Discover and call an agent
+
+```go
+ctx := context.Background()
+
+// Resolve an agent card (signed, verified)
+card, err := za2a.Resolve(ctx, "zap://reviewer.example:9200")
+if err != nil { log.Fatal(err) }
+
+fmt.Println("Skills:", card.Skills)
+
+// Issue a task
+client, _ := za2a.Connect(ctx, card.URL)
+task, _ := client.CreateTask(ctx, "review", map[string]any{
+    "pr-url": "https://github.com/example/repo/pull/123",
+})
+
+// Stream task updates
+for update := range task.Updates() {
+    fmt.Printf("[%s] %s\n", update.State, update.Message)
+}
+
+// Pull final artifacts
+artifacts, _ := task.Artifacts(ctx)
+```
+
+## Multi-agent flows
+
+```go
+// Chain code-review → security-scan → ship
+reviewTask, _ := reviewer.CreateTask(ctx, "review", inputs)
+review, _ := reviewTask.Wait(ctx)
+
+scanTask, _ := scanner.CreateTask(ctx, "scan", map[string]any{
+    "code": review.Artifact("review.md"),
+})
+scan, _ := scanTask.Wait(ctx)
+
+if scan.Result["verdict"] == "clean" {
+    deployer.CreateTask(ctx, "ship", inputs)
+}
+```
+
+## Related
+
+- [zap-proto/a2a](https://github.com/zap-proto/a2a) — Go implementation
+- [Google A2A specification](https://google.github.io/A2A/) — upstream spec
+- [ACP over ZAP](/docs/protocols/acp) — alternative for FIPA-style structured dialog
+- [RNS](/docs/protocols/rns) — for keying agent discovery to identity rather than DNS

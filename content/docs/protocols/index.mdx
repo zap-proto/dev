@@ -1,0 +1,40 @@
+---
+title: Protocols over ZAP
+description: Higher-level protocols carried on the ZAP wire — HTTP, MCP, A2A, ACP, RNS, FIX, WS.
+---
+
+# Protocols over ZAP
+
+ZAP is a wire format and capability-based RPC system. Real applications speak a *higher-level* protocol on top — HTTP for the web, MCP for agent tool-calls, FIX for trading, etc. Each of those protocols has a corresponding **channel implementation** that maps its message types onto ZAP frames.
+
+The benefits over running these on classic transports:
+
+- **Zero-copy at every hop** — the payload sits in shared-memory buffers from network read to handler dispatch. No serializer step between layers.
+- **One auth model** — mutual KEM-bound identity at the transport. The higher-level protocol inherits authentication for free; no per-layer JWT, no API keys, no cookies.
+- **One observability model** — every frame is signed and content-addressed. Wireshark sees the same flow your application sees.
+- **One framing layer** — multi-stream, FEC, no head-of-line blocking by default. The higher-level protocol doesn't re-invent it.
+
+## Channels
+
+| Channel | Package | Replaces |
+|---|---|---|
+| [HTTP](/docs/protocols/http) | `github.com/zap-proto/http` | `net/http`, Express, FastAPI |
+| [MCP](/docs/protocols/mcp) | `github.com/zap-proto/mcp` | stdio MCP, websocket MCP |
+| [A2A](/docs/protocols/a2a) | `github.com/zap-proto/a2a` | Google Agent-to-Agent over HTTPS |
+| [ACP](/docs/protocols/acp) | `github.com/zap-proto/acp` | FIPA ACL |
+| [RNS](/docs/protocols/rns) | `github.com/zap-proto/rns` | DNS for services, mDNS, K8s DNS |
+| [FIX](/docs/protocols/fix) | `github.com/zap-proto/fix` | FIX 4.4 / 5.0 over SSL TCP |
+| [WS](/docs/protocols/ws) | `github.com/zap-proto/ws` | WebSocket, NATS, MQTT |
+
+All channel packages are Go-first (the reference implementations); polyglot clients can speak them via the per-language SDKs at [/docs/sdks](/docs/sdks).
+
+## Picking the right channel
+
+| You need | Use |
+|---|---|
+| Drop-in replacement for `net/http.Handler` | `zap-proto/http` |
+| Agent tool-call channel (replacement for MCP-over-stdio) | `zap-proto/mcp` |
+| Cross-vendor agent messaging | `zap-proto/a2a` or `zap-proto/acp` |
+| Service discovery bound to identity, not DNS | `zap-proto/rns` |
+| Sub-µs trading | `zap-proto/fix` |
+| Pubsub with per-stream FEC, no head-of-line blocking | `zap-proto/ws` |

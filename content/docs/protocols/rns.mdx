@@ -1,0 +1,90 @@
+---
+title: RNS over ZAP
+description: Resource Name Service — service discovery bound to keypair identity, not DNS.
+---
+
+# RNS over ZAP
+
+`zap-proto/rns` is the **Resource Name Service** — a DNS replacement for ZAP services. Instead of looking up an A/AAAA record, you resolve a name to a *KEM keypair* and its current ZAP endpoints. The peer's identity is the address; you can prove who you connected to without trusting a CA, a DNS provider, or a control plane.
+
+## Why not DNS?
+
+DNS resolves names to IPs. The peer's identity is whatever happens to be sitting on that IP, validated (maybe) by a certificate signed by a CA you implicitly trust. RNS instead:
+
+- Resolves to a **keypair** — the peer must prove possession of the private key on connect.
+- Resolves to **all current endpoints** — IPv4, IPv6, ZAP-over-Tor, ZAP-over-WireGuard — at once.
+- Updates are **signed by the owning key**, not by the registrar. No "registrar hijack" attack surface.
+- Names can be **opaque** (`did:zap:z6Mk...`) for permissionless deployment, or **human-readable** (`acme.payments`) when registered against a community-run namespace.
+
+## Install
+
+```bash
+go get github.com/zap-proto/rns
+```
+
+## Resolve a name
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+
+    zrns "github.com/zap-proto/rns"
+)
+
+func main() {
+    ctx := context.Background()
+
+    record, err := zrns.Resolve(ctx, "acme.payments")
+    if err != nil { log.Fatal(err) }
+
+    fmt.Println("Identity:", record.Identity)        // did:zap:z6Mk...
+    fmt.Println("Endpoints:", record.Endpoints)      // [zap://1.2.3.4:9000, zap://[2001::1]:9000]
+    fmt.Println("Signed at:", record.SignedAt)
+    fmt.Println("Signed by:", record.Signature.Verify(record.Identity))
+}
+```
+
+The returned record is signed by the owning identity — a forged or stale answer fails verification.
+
+## Publish a record
+
+```go
+identity := zrns.LoadIdentity("./acme.key")  // ML-KEM-768 + Ed25519
+
+publisher := zrns.NewPublisher(identity)
+err := publisher.Publish(ctx, "acme.payments", zrns.Record{
+    Endpoints: []string{"zap://1.2.3.4:9000", "zap://[2001::1]:9000"},
+    TTL:       300,
+})
+```
+
+Records are content-addressed in the RNS registry by `hash(identity || name)`, so multiple publishers don't collide and you can't squat someone else's identity.
+
+## Watch for updates
+
+```go
+ch, _ := zrns.Watch(ctx, "acme.payments")
+for record := range ch {
+    fmt.Println("endpoints updated:", record.Endpoints)
+}
+```
+
+Use this to drive load-balancer config without polling — when the publisher rotates endpoints (failover, scale-out), every watcher sees it within one round trip.
+
+## DID resolution
+
+RNS doubles as a DID resolver for `did:zap`:
+
+```go
+doc, _ := zrns.ResolveDID(ctx, "did:zap:z6Mk...")
+fmt.Println("Controller:", doc.Controller)
+fmt.Println("Service endpoints:", doc.Service)
+```
+
+## Related
+
+- [zap-proto/rns](https://github.com/zap-proto/rns) — Go implementation
+- [transports](/docs/transports) — how RNS records map to underlying endpoints

@@ -12,6 +12,8 @@
     "consensus",
     "---SDKs---",
     "sdks",
+    "---Protocols over ZAP---",
+    "protocols",
     "---Reference---",
     "api",
     "benchmarks"

@@ -65,18 +65,18 @@ These are stand-alone wire codecs (no RPC layer) for embedding ZAP into other st
 
 ## Protocols over ZAP
 
-ZAP carries higher-level protocols as channel implementations. Each is a separate package; pick the ones you need.
+ZAP carries higher-level protocols as channel implementations. Each is a separate package; pick the ones you need. See the [protocols section](/docs/protocols) for full guides.
 
-| Protocol | Package | Repo |
-|---|---|---|
-| HTTP (net/http drop-in) | `github.com/zap-proto/http` | [zap-proto/http](https://github.com/zap-proto/http) |
-| MCP (Model Context Protocol) | `github.com/zap-proto/mcp` | [zap-proto/mcp](https://github.com/zap-proto/mcp) |
-| A2A (Agent-to-Agent) | `github.com/zap-proto/a2a` | [zap-proto/a2a](https://github.com/zap-proto/a2a) |
-| ACP (Agent Communication, FIPA-style) | `github.com/zap-proto/acp` | [zap-proto/acp](https://github.com/zap-proto/acp) |
-| RNS (Resource Name Service) | `github.com/zap-proto/rns` | [zap-proto/rns](https://github.com/zap-proto/rns) |
-| FIX 4.4 / 5.0 trading | `github.com/zap-proto/fix` | [zap-proto/fix](https://github.com/zap-proto/fix) |
-| WS (multi-stream pubsub) | `github.com/zap-proto/ws` | [zap-proto/ws](https://github.com/zap-proto/ws) |
-| Bench (HTTP perf harness) | `github.com/zap-proto/bench` | [zap-proto/bench](https://github.com/zap-proto/bench) |
+| Protocol | Package | Repo | Guide |
+|---|---|---|---|
+| HTTP (net/http drop-in) | `github.com/zap-proto/http` | [zap-proto/http](https://github.com/zap-proto/http) | [HTTP over ZAP](/docs/protocols/http) |
+| MCP (Model Context Protocol) | `github.com/zap-proto/mcp` | [zap-proto/mcp](https://github.com/zap-proto/mcp) | [MCP over ZAP](/docs/protocols/mcp) |
+| A2A (Agent-to-Agent) | `github.com/zap-proto/a2a` | [zap-proto/a2a](https://github.com/zap-proto/a2a) | [A2A over ZAP](/docs/protocols/a2a) |
+| ACP (Agent Communication, FIPA-style) | `github.com/zap-proto/acp` | [zap-proto/acp](https://github.com/zap-proto/acp) | [ACP over ZAP](/docs/protocols/acp) |
+| RNS (Resource Name Service) | `github.com/zap-proto/rns` | [zap-proto/rns](https://github.com/zap-proto/rns) | [RNS over ZAP](/docs/protocols/rns) |
+| FIX 4.4 / 5.0 trading | `github.com/zap-proto/fix` | [zap-proto/fix](https://github.com/zap-proto/fix) | [FIX over ZAP](/docs/protocols/fix) |
+| WS (multi-stream pubsub) | `github.com/zap-proto/ws` | [zap-proto/ws](https://github.com/zap-proto/ws) | [WS over ZAP](/docs/protocols/ws) |
+| Bench (HTTP perf harness) | `github.com/zap-proto/bench` | [zap-proto/bench](https://github.com/zap-proto/bench) | [Benchmarks](/docs/benchmarks) |
 
 ## Specification & Research
 

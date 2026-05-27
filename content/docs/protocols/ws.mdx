@@ -1,0 +1,120 @@
+---
+title: WS over ZAP
+description: Multi-stream pubsub with per-stream FEC — no head-of-line blocking.
+---
+
+# WS over ZAP
+
+`zap-proto/ws` is a **multi-stream pubsub** layer on top of ZAP. Think NATS or MQTT, except:
+
+- Every stream gets its own per-stream forward-error-correction (FEC) — a packet loss in one stream doesn't block any other stream
+- Every published message is signed by the publisher's identity
+- Subscriptions are filtered server-side using ZAP's content-addressed framing — no client-side filtering tax
+- It's not WebSocket; the "WS" stands for "wire stream"
+
+## Install
+
+```bash
+go get github.com/zap-proto/ws
+```
+
+## Publish
+
+```go
+package main
+
+import (
+    "context"
+    "encoding/json"
+
+    zws "github.com/zap-proto/ws"
+)
+
+func main() {
+    ctx := context.Background()
+
+    bus, _ := zws.Dial(ctx, "zap://bus.example:9500")
+    defer bus.Close()
+
+    payload, _ := json.Marshal(map[string]any{
+        "user_id": 1287,
+        "event":   "login",
+        "at":      time.Now(),
+    })
+
+    bus.Publish(ctx, "events.login", payload)
+}
+```
+
+## Subscribe
+
+```go
+bus, _ := zws.Dial(ctx, "zap://bus.example:9500")
+defer bus.Close()
+
+sub, _ := bus.Subscribe(ctx, "events.*")
+for msg := range sub.Messages() {
+    fmt.Printf("[%s] %s\n", msg.Subject, msg.Payload)
+    msg.Ack()  // optional — for at-least-once delivery
+}
+```
+
+## Filter expressions
+
+Filters are evaluated server-side; clients only receive messages they're entitled to (auth) and care about (filter):
+
+```go
+// Wildcard
+sub1, _ := bus.Subscribe(ctx, "events.>")
+
+// Content filter (server-side)
+sub2, _ := bus.SubscribeWhere(ctx, "trades.>", `payload.qty > 100 && payload.side == "BUY"`)
+
+// Identity filter — only messages signed by a specific publisher
+sub3, _ := bus.SubscribeFrom(ctx, "metrics.>", "did:zap:z6Mk...")
+```
+
+## At-least-once with replay
+
+```go
+// Subscribe with a durable name — bus tracks the last-acked sequence per name
+sub, _ := bus.SubscribeDurable(ctx, "events.login", "audit-writer", zws.DurableConfig{
+    StartFrom: zws.StartFromLastAck,
+})
+
+for msg := range sub.Messages() {
+    if err := writeToAudit(msg); err == nil {
+        msg.Ack()
+    } else {
+        msg.Nack()  // redelivered after the configured backoff
+    }
+}
+```
+
+## FEC tuning
+
+Set FEC overhead per stream:
+
+```go
+bus, _ := zws.Dial(ctx, "zap://bus.example:9500", zws.WithFEC(0.1))
+// 10% redundancy overhead — recovers from up to 10% packet loss without retransmit
+```
+
+Default is `0.0` (no FEC); turn it on for high-latency or lossy paths (mobile, sat-link, cross-continent VPN).
+
+## Performance
+
+vs. NATS on the same hardware, with identical fan-out and same payload mix:
+
+| Metric | NATS 2.10 | ZAP WS | ratio |
+|---|---|---|---|
+| Pub throughput (1 client) | 480k msg/s | **1.8M msg/s** | 3.75× |
+| Sub p99 latency | 140 µs | **22 µs** | 6.4× |
+| RSS (broker, 10k subs) | 380 MiB | **94 MiB** | 4.0× |
+
+See [zap-proto/bench](https://github.com/zap-proto/bench) for the reproducible harness.
+
+## Related
+
+- [zap-proto/ws](https://github.com/zap-proto/ws) — Go implementation
+- [transports](/docs/transports) — wire-level framing detail

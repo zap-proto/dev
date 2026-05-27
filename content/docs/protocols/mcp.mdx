@@ -1,0 +1,110 @@
+---
+title: MCP over ZAP
+description: Model Context Protocol over ZAP — mutually authenticated, non-repudiable agent tool-calls.
+---
+
+# MCP over ZAP
+
+`zap-proto/mcp` carries the **Model Context Protocol** (Anthropic's agent ↔ tool standard) over the ZAP wire. Compared to stdio MCP, you get:
+
+- **Mutual KEM authentication** — the server and client identities are bound to keypairs at the transport layer. No bearer tokens.
+- **Non-repudiation** — every tool-call and result is signed; you can prove who called what.
+- **Network-native** — works across hosts without `ssh -L` tricks.
+- **Capability tokens** — each tool call can attach a delegated capability rather than the full client identity.
+
+## Install
+
+```bash
+go get github.com/zap-proto/mcp
+```
+
+## Server (tool host)
+
+```go
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "log"
+
+    zmcp "github.com/zap-proto/mcp"
+)
+
+type fsTool struct{}
+
+func (fsTool) Name() string        { return "read_file" }
+func (fsTool) Description() string { return "Read a file from disk" }
+func (fsTool) Schema() []byte {
+    return []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`)
+}
+
+func (fsTool) Call(ctx context.Context, args json.RawMessage) (any, error) {
+    var p struct{ Path string }
+    if err := json.Unmarshal(args, &p); err != nil { return nil, err }
+    data, err := os.ReadFile(p.Path)
+    return string(data), err
+}
+
+func main() {
+    srv := zmcp.NewServer(zmcp.ServerInfo{
+        Name:    "fs",
+        Version: "0.1.0",
+    })
+    srv.Register(fsTool{})
+
+    log.Fatal(srv.ListenAndServe("zap://0.0.0.0:9100"))
+}
+```
+
+## Client (agent)
+
+```go
+ctx := context.Background()
+
+client, err := zmcp.Connect(ctx, "zap://localhost:9100")
+if err != nil { log.Fatal(err) }
+defer client.Close()
+
+tools, err := client.ListTools(ctx)
+for _, t := range tools {
+    fmt.Println(t.Name, "—", t.Description)
+}
+
+result, err := client.CallTool(ctx, "read_file", map[string]string{
+    "path": "/etc/hosts",
+})
+fmt.Println(result.Content)
+```
+
+## Gateway
+
+`zap-proto/mcp` includes a gateway that lifts existing stdio MCP servers onto the ZAP wire, so you don't have to rewrite tool hosts you've already deployed:
+
+```go
+gw := zmcp.NewGateway()
+
+// Mount an existing stdio MCP server
+_, _ = gw.AddStdioServer(ctx, "fs", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp")
+_, _ = gw.AddStdioServer(ctx, "gh", "npx", "-y", "@modelcontextprotocol/server-github")
+
+log.Fatal(gw.ListenAndServe("zap://0.0.0.0:9100"))
+```
+
+The gateway forwards client tool-calls to the appropriate stdio child, manages lifetimes, and surfaces unified `tools/list` and `tools/call` over ZAP.
+
+## Bidirectional sampling
+
+MCP allows the server to call back into the client (`sampling/createMessage`). ZAP carries this on the same connection — no separate upstream:
+
+```go
+srv.HandleSampling(func(ctx context.Context, msg zmcp.SamplingRequest) (zmcp.SamplingResponse, error) {
+    // ... ask the agent's LLM to draft something
+})
+```
+
+## Related
+
+- [zap-proto/mcp](https://github.com/zap-proto/mcp) — Go implementation
+- [A2A over ZAP](/docs/protocols/a2a) — for agent-to-agent messaging, not tool calls
+- [ACP over ZAP](/docs/protocols/acp) — for FIPA-style structured speech acts

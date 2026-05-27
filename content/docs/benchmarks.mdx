@@ -66,6 +66,8 @@ These are the levers. When the harness produces wins on µs/req, they'll land he
 
 ## Run it yourself
 
+### Go harness (HTTP-shaped workloads)
+
 ```bash
 git clone https://github.com/zap-proto/bench
 cd bench
@@ -73,6 +75,53 @@ go test -v -run Test 2>&1 | tee my-bench-results.txt
 ```
 
 Tweak the workloads in `bench_test.go`. Hardware will move the numbers; the **ratios** should be reproducible across machines.
+
+### Rust harness (carsales / catrank / eval)
+
+The classic Cap'n-Proto-derived workload suite ported to the ZAP Rust SDK. Produces structured JSON for cross-machine comparison.
+
+```bash
+git clone https://github.com/zap-proto/rust
+cd rust
+./benchmark/bench.sh quick     # ~10 sec sanity
+./benchmark/bench.sh default   # original iteration counts, ~1 min
+./benchmark/bench.sh full      # 10× iterations, ~10 min
+```
+
+Each run writes one JSON file to `bench-results/$(hostname)-$(timestamp).json`. The schema is documented in [zap-proto/rust/benchmark/README.md](https://github.com/zap-proto/rust/blob/main/benchmark/README.md):
+
+```json
+{
+  "schema_version": 1,
+  "host": {"hostname":"...","os":"...","arch":"..."},
+  "toolchain": {"rustc":"..."},
+  "iters": {"carsales":10000,"catrank":1000,"eval":200000},
+  "runs": [
+    {"case":"carsales","mode":"object","compression":"none",
+     "scratch":"reuse","iters":10000,"elapsed_secs":0.42,
+     "throughput_ops_per_sec":23809.5},
+    ...
+  ]
+}
+```
+
+Twenty runs per file (carsales × 2 scratch × 5 modes/compressions + catrank × 5 + eval × 5).
+
+### Contribute results across hardware
+
+The whole point of producing structured JSON is so we can collect numbers across hardware classes — server CPUs vs laptops vs embedded vs cloud VMs. Open a PR against [zap-proto/rust](https://github.com/zap-proto/rust/tree/main/benchmark) dropping your `bench-results/*.json` into the `bench-results/` directory. The schema is stable; future aggregation will pull from whatever's in there.
+
+A sample run from this dev machine (Apple M-series, macOS aarch64, `quick` preset, `eval` case only):
+
+| mode | compression | iters | elapsed | ops/s |
+|---|---|---|---|---|
+| object | none | 10000 | 0.025s | 405,986 |
+| bytes | none | 10000 | 0.029s | 339,869 |
+| bytes | packed | 10000 | 0.045s | 223,006 |
+| pipe | none | 10000 | 0.123s | 81,007 |
+| pipe | packed | 10000 | 0.201s | 49,760 |
+
+Object-mode wins because there's no encode/decode step — the in-memory layout *is* the wire layout. Pipe is slowest because it crosses a process boundary. Packed adds compute for compression in exchange for fewer bytes on the wire. The shape of these numbers should hold across machines; absolute throughput will swing with CPU and cache size.
 
 ## Methodology
 

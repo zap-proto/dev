@@ -87,7 +87,13 @@ log.Fatal(zhttp.ListenAndServe(":9000", zhttp.FromNetHTTP(existing)))
 
 ## Performance
 
-See the [benchmark page](/docs/benchmarks) and [zap-proto/bench](https://github.com/zap-proto/bench) for the reproducible harness. Headline: 6.0× req/s, 19× lower p99 latency, 6.2× less RSS vs. `net/http` at 1k keep-alive connections.
+See [zap-proto/bench](https://github.com/zap-proto/bench) for the reproducible harness. The current harness (`bench-results.txt`) measures HTTP/1.1+JSON against ZAP-binary across tiny/small/medium/large workloads at concurrency=32:
+
+- Wire bytes: roughly **parity** (0.91-0.99× across sizes — ZAP wins at small payloads, ties at large)
+- Throughput: HTTP currently wins by **~10%** at small/medium workloads — the ZAP-HTTP path has more allocations than tight `net/http`
+- Allocations: HTTP currently allocates ~30% less per request
+
+This is honest: ZAP-HTTP today is **not faster** than tuned `net/http`. The value is in *what else you get*: PQ KEM auth at the transport, capability semantics, and a single wire format usable across many higher-level protocols. Raw req/s wins require an optimization pass that's part of the roadmap and will be re-measured against the bench harness, not asserted in docs.
 
 ## Related
 

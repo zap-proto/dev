@@ -1,16 +1,19 @@
 ---
 title: MCP over ZAP
-description: Model Context Protocol over ZAP — mutually authenticated, non-repudiable agent tool-calls.
+description: Model Context Protocol bridge — lifts existing stdio MCP servers onto the ZAP wire.
 ---
 
 # MCP over ZAP
 
-`zap-proto/mcp` carries the **Model Context Protocol** (Anthropic's agent ↔ tool standard) over the ZAP wire. Compared to stdio MCP, you get:
+`zap-proto/mcp` is a **bridge** that lifts existing **stdio MCP** servers (Anthropic Model Context Protocol) onto the ZAP wire. You don't rewrite your tool host; you point the bridge at it and clients call tools over ZAP instead of stdio.
 
-- **Mutual KEM authentication** — the server and client identities are bound to keypairs at the transport layer. No bearer tokens.
-- **Non-repudiation** — every tool-call and result is signed; you can prove who called what.
+Compared to stdio MCP, you get:
+
+- **Mutual KEM authentication** — server and client identities are bound to keypairs at the transport. No bearer tokens.
 - **Network-native** — works across hosts without `ssh -L` tricks.
-- **Capability tokens** — each tool call can attach a delegated capability rather than the full client identity.
+- **Multiplexed** — many concurrent tool calls share one connection without head-of-line blocking.
+
+> The actual MCP **wire protocol** between client and bridge is built on the ZAP `Node` message handler API. The example below uses the real exported types from [zap-proto/mcp/bridge.go](https://github.com/zap-proto/mcp/blob/main/bridge.go). The bridge wraps existing stdio MCP servers; full client SDK ergonomics will be added once a stable ZAP RPC client lands in the core SDK.
 
 ## Install
 
@@ -18,93 +21,92 @@ description: Model Context Protocol over ZAP — mutually authenticated, non-rep
 go get github.com/zap-proto/mcp
 ```
 
-## Server (tool host)
+## Run a bridge over your stdio MCP servers
 
 ```go
 package main
 
 import (
     "context"
-    "encoding/json"
     "log"
 
+    "github.com/luxfi/zap"
     zmcp "github.com/zap-proto/mcp"
 )
 
-type fsTool struct{}
-
-func (fsTool) Name() string        { return "read_file" }
-func (fsTool) Description() string { return "Read a file from disk" }
-func (fsTool) Schema() []byte {
-    return []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`)
-}
-
-func (fsTool) Call(ctx context.Context, args json.RawMessage) (any, error) {
-    var p struct{ Path string }
-    if err := json.Unmarshal(args, &p); err != nil { return nil, err }
-    data, err := os.ReadFile(p.Path)
-    return string(data), err
-}
-
 func main() {
-    srv := zmcp.NewServer(zmcp.ServerInfo{
-        Name:    "fs",
-        Version: "0.1.0",
+    node, err := zap.NewNode(zap.NodeConfig{
+        Listen: "tcp://0.0.0.0:9100",
     })
-    srv.Register(fsTool{})
+    if err != nil {
+        log.Fatal(err)
+    }
 
-    log.Fatal(srv.ListenAndServe("zap://0.0.0.0:9100"))
+    bridge := zmcp.NewBridge(node)
+
+    if err := bridge.AddServer("fs", "npx", "-y",
+        "@modelcontextprotocol/server-filesystem", "/tmp"); err != nil {
+        log.Fatal(err)
+    }
+
+    if err := bridge.AddServer("gh", "npx", "-y",
+        "@modelcontextprotocol/server-github"); err != nil {
+        log.Fatal(err)
+    }
+
+    log.Println("MCP bridge listening on tcp://0.0.0.0:9100")
+    log.Fatal(node.Serve())
 }
 ```
 
-## Client (agent)
+The bridge:
+1. Spawns each stdio MCP server as a child process
+2. Discovers its tools via the MCP `tools/list` request
+3. Assigns each tool a stable `uint32` ID
+4. Registers ZAP message handlers (`MsgTypeToolList`, `MsgTypeToolCall`) that route to the right child
+
+## Call a tool
+
+From a Go client speaking the bridge's ZAP message types:
 
 ```go
-ctx := context.Background()
-
-client, err := zmcp.Connect(ctx, "zap://localhost:9100")
-if err != nil { log.Fatal(err) }
-defer client.Close()
-
-tools, err := client.ListTools(ctx)
+// List discovered tools
+tools := bridge.GetTools()
 for _, t := range tools {
-    fmt.Println(t.Name, "—", t.Description)
+    log.Printf("tool %d: %s — %s", t.ID, t.Name, t.Description)
 }
 
-result, err := client.CallTool(ctx, "read_file", map[string]string{
+// Call a tool by name
+result, err := bridge.CallToolByName(ctx, "read_file", map[string]interface{}{
     "path": "/etc/hosts",
 })
-fmt.Println(result.Content)
 ```
 
-## Gateway
+`CallTool(ctx, toolID, args)` calls by stable numeric ID — useful when clients want to avoid round-tripping the name.
 
-`zap-proto/mcp` includes a gateway that lifts existing stdio MCP servers onto the ZAP wire, so you don't have to rewrite tool hosts you've already deployed:
+## ServerConfig
 
-```go
-gw := zmcp.NewGateway()
-
-// Mount an existing stdio MCP server
-_, _ = gw.AddStdioServer(ctx, "fs", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp")
-_, _ = gw.AddStdioServer(ctx, "gh", "npx", "-y", "@modelcontextprotocol/server-github")
-
-log.Fatal(gw.ListenAndServe("zap://0.0.0.0:9100"))
-```
-
-The gateway forwards client tool-calls to the appropriate stdio child, manages lifetimes, and surfaces unified `tools/list` and `tools/call` over ZAP.
-
-## Bidirectional sampling
-
-MCP allows the server to call back into the client (`sampling/createMessage`). ZAP carries this on the same connection — no separate upstream:
+For configuration-driven setup:
 
 ```go
-srv.HandleSampling(func(ctx context.Context, msg zmcp.SamplingRequest) (zmcp.SamplingResponse, error) {
-    // ... ask the agent's LLM to draft something
+bridge.AddServerConfig(zmcp.ServerConfig{
+    Name:    "fs",
+    Command: "npx",
+    Args:    []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
 })
 ```
+
+## Performance
+
+The package comment claims 10-30× over stdio MCP JSON-RPC. The bridge eliminates per-call JSON encoding/decoding by encoding tool calls in ZAP binary frames; numbers are reproducible from the bench in [zap-proto/bench](https://github.com/zap-proto/bench) once the MCP-specific harness lands. **No specific p50/p99 numbers in these docs until the harness produces them.**
+
+## What's not in the bridge yet
+
+- A first-class non-Go client SDK. Today the bridge speaks ZAP message types directly; a higher-level `mcp.Client` that wraps `zap-proto/go` is on the roadmap.
+- Bidirectional `sampling/createMessage` (server → client model calls).
 
 ## Related
 
-- [zap-proto/mcp](https://github.com/zap-proto/mcp) — Go implementation
+- [zap-proto/mcp](https://github.com/zap-proto/mcp) — bridge implementation
 - [A2A over ZAP](/docs/protocols/a2a) — for agent-to-agent messaging, not tool calls
-- [ACP over ZAP](/docs/protocols/acp) — for FIPA-style structured speech acts
+- [Native ZAP RPC](/docs/protocols/native) — what the bridge is built on

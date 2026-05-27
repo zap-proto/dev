@@ -1,125 +1,40 @@
 ---
 title: FIX over ZAP
-description: FIX 4.4 / 5.0 trading channel over ZAP — sub-microsecond p99 latency.
+description: FIX 4.4 / 5.0 trading channel — schema published, runtime in progress.
 ---
 
 # FIX over ZAP
 
-`zap-proto/fix` carries the **Financial Information eXchange (FIX) protocol** — versions 4.4 and 5.0 SP2 — over the ZAP wire. The wire encoding is fully FIX-compliant (parses with any FIX engine), but the transport is ZAP, which buys you:
+> **Status — spec-only, January 2026.** The wire schema is published; the Go acceptor / initiator runtime hasn't shipped. The target use case is sub-µs trading where FIX semantics are required but the SSL/TCP transport overhead isn't acceptable.
 
-- **Sub-µs p99** at common message sizes — versus 50-200 µs for FIX over SSL/TCP
-- **Mutual KEM auth at the transport** — no per-session FIX logon/CompID handshake security theater
+`zap-proto/fix` carries the **Financial Information eXchange (FIX) protocol** — versions 4.4 and 5.0 SP2 — over the ZAP wire. The wire encoding will be FIX-compliant (parses with any FIX engine after the transport bridge); the transport will be ZAP.
+
+## Why on ZAP
+
+- **Mutual KEM auth at the transport** — no per-session FIX Logon/CompID handshake security theater
 - **No head-of-line blocking** — multi-stream framing means a slow market-data subscription doesn't stall order-entry
-- **Lossless audit trail** — every message is signed by sender ID and timestamped at wire time, not application time
+- **Lossless audit trail** — every message signed by sender ID and timestamped at wire receipt, not application time
+- **Bridge to classical FIX** is part of the design — interop with QuickFIX engines is non-negotiable for any real venue
 
-## Install
+## Schema
 
-```bash
-go get github.com/zap-proto/fix
-```
+Published at [zap-proto/fix/schema/zap_fix.zap](https://github.com/zap-proto/fix/blob/main/schema/zap_fix.zap). Maps every FIX 4.4 message type onto ZAP structs. Generated types via [SDK codegen](/docs/sdks).
 
-## Server (acceptor / venue)
+## Roadmap
 
-```go
-package main
+| Milestone | Target |
+|---|---|
+| Wire schema published (FIX 4.4) | ✅ |
+| FIX 5.0 SP2 schema | in progress |
+| Go acceptor + initiator | in progress |
+| Bridge to QuickFIX TCP/SSL | proposed |
+| Real-world performance harness | once runtime stabilizes |
 
-import (
-    "context"
-    "log"
+We will not publish performance numbers until they're reproducible from [zap-proto/bench](https://github.com/zap-proto/bench). The current bench harness only covers HTTP-shaped workloads; a FIX-specific harness is part of the runtime delivery.
 
-    zfix "github.com/zap-proto/fix"
-)
-
-type matchingEngine struct{ /* ... */ }
-
-func (e *matchingEngine) OnNewOrderSingle(ctx context.Context, msg zfix.NewOrderSingle) error {
-    fill, partial, _ := e.match(msg)
-    _ = partial
-
-    if fill != nil {
-        msg.Reply(zfix.ExecutionReport{
-            OrderID:  msg.ClOrdID,
-            ExecType: zfix.ExecTypeFill,
-            LastPx:   fill.Price,
-            LastQty:  fill.Qty,
-        })
-    }
-    return nil
-}
-
-func main() {
-    venue := zfix.NewAcceptor(zfix.Config{
-        SenderCompID:     "VENUE",
-        SupportedTargets: []string{"INITIATOR1", "INITIATOR2"},
-    })
-    venue.Handle(&matchingEngine{})
-
-    log.Fatal(venue.ListenAndServe("zap://0.0.0.0:9400"))
-}
-```
-
-## Client (initiator / member)
-
-```go
-ctx := context.Background()
-
-session, _ := zfix.Dial(ctx, "zap://venue.example:9400", zfix.SessionConfig{
-    SenderCompID: "INITIATOR1",
-    TargetCompID: "VENUE",
-})
-defer session.Logout(ctx)
-
-exec, _ := session.SendAwaitFill(ctx, zfix.NewOrderSingle{
-    ClOrdID:     "client-id-001",
-    Symbol:      "ESH4",
-    Side:        zfix.SideBuy,
-    OrderQty:    10,
-    OrdType:     zfix.OrdTypeMarket,
-    TimeInForce: zfix.TIFDay,
-})
-
-fmt.Printf("Filled %d @ %s\n", exec.LastQty, exec.LastPx)
-```
-
-## Market data subscription
-
-```go
-md, _ := session.SubscribeMarketData(ctx, zfix.MarketDataRequest{
-    SubReqType:  zfix.SubscriptionTypeSnapshotPlusUpdates,
-    MarketDepth: 10,
-    Symbols:     []string{"ESH4", "NQH4", "RTYH4"},
-})
-
-for update := range md.Updates() {
-    fmt.Printf("[%s] %s %.2f / %.2f\n",
-        update.Symbol, update.UpdateType, update.BidPx, update.AskPx)
-}
-```
-
-## Bridge to QuickFIX / classic engines
-
-`zap-proto/fix` ships a `Bridge` that translates ZAP-FIX to classic SSL/TCP FIX for legacy counterparties:
-
-```go
-bridge := zfix.NewBridge(zfix.BridgeConfig{
-    ZapAcceptor: "zap://0.0.0.0:9400",
-    LegacyDial:  "tcp+tls://legacy-broker.example:9876",
-    SessionMap:  map[string]string{"INITIATOR1": "LEGACYCLIENT1"},
-})
-log.Fatal(bridge.Run())
-```
-
-## Performance notes
-
-| Path | p50 | p99 | Notes |
-|---|---|---|---|
-| FIX over SSL/TCP | 95 µs | 220 µs | Reference: typical broker engine |
-| FIX over ZAP | **0.8 µs** | **3.1 µs** | Same hardware, same matching logic |
-
-Numbers from the [zap-proto/bench](https://github.com/zap-proto/bench) harness, single-host loopback, AMD 9950X. Real-world adds NIC and switch transit (~3-15 µs each way) — but the per-message protocol overhead is what's tiny.
+Track progress on [zap-proto/fix](https://github.com/zap-proto/fix).
 
 ## Related
 
-- [zap-proto/fix](https://github.com/zap-proto/fix) — Go implementation
-- [zap-proto/bench](https://github.com/zap-proto/bench) — performance harness
-- [benchmarks page](/docs/benchmarks) — full results
+- [Native ZAP RPC](/docs/protocols/native)
+- [Transports](/docs/transports)

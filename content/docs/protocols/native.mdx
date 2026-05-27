@@ -1,0 +1,241 @@
+---
+title: Native ZAP RPC
+description: ZAP used directly — capability-based RPC, no higher-level protocol on top.
+---
+
+# Native ZAP RPC
+
+When you reach for HTTP, MCP, or FIX, you're carrying *someone else's* protocol on the ZAP wire. **Native ZAP RPC** is when ZAP is the application protocol: you define your own interfaces in `.zap` schema, generate code, and your services talk directly in ZAP messages.
+
+This is the fastest path on the wire and the only path that gives you ZAP's full capability model — explicit, transferable, revocable capabilities instead of bearer tokens.
+
+## When to use native vs. a higher-level protocol
+
+| Use native ZAP RPC | Use a protocol-over-ZAP |
+|---|---|
+| Greenfield internal service ↔ service | You need to be reachable from existing HTTP / MCP / FIX clients |
+| You want capabilities, not API keys | You're integrating with code you don't control |
+| You want streaming with no framing tax | You're behind a corporate gateway that only knows HTTP |
+| You care about every µs | The classical protocol's semantics are exactly right |
+
+## Define a schema
+
+```
+# calculator.zap
+interface Calculator
+  add        (a Float64, b Float64) -> (result Float64)
+  subtract   (a Float64, b Float64) -> (result Float64)
+  divide     (a Float64, b Float64) -> (result Float64)
+  sum        (numbers List(Float64)) -> (total Float64)
+  observe    (subject Text) -> (stream stream Float64)
+```
+
+No file IDs. No ordinals. Forward-compatible: append-only field/method addition is non-breaking by construction.
+
+## Generate code
+
+```bash
+zap compile -o ./gen calculator.zap --go --ts --py --rust --java
+```
+
+One pass generates every language at once. The compiler is content-addressed; an unchanged schema produces byte-identical output.
+
+## Server (Go)
+
+```go
+package main
+
+import (
+    "context"
+    "errors"
+    "log"
+
+    zap "github.com/zap-proto/go"
+    "yourmod/gen"
+)
+
+type calc struct{}
+
+func (calc) Add(ctx context.Context, a, b float64) (float64, error)      { return a + b, nil }
+func (calc) Subtract(ctx context.Context, a, b float64) (float64, error) { return a - b, nil }
+
+func (calc) Divide(ctx context.Context, a, b float64) (float64, error) {
+    if b == 0 {
+        return 0, errors.New("division by zero")
+    }
+    return a / b, nil
+}
+
+func (calc) Sum(ctx context.Context, ns []float64) (float64, error) {
+    var t float64
+    for _, n := range ns {
+        t += n
+    }
+    return t, nil
+}
+
+func (calc) Observe(ctx context.Context, subject string, out zap.Stream[float64]) error {
+    ticker := time.NewTicker(time.Second)
+    defer ticker.Stop()
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-ticker.C:
+            if err := out.Send(rand.Float64()); err != nil {
+                return err
+            }
+        }
+    }
+}
+
+func main() {
+    srv := zap.NewServer(zap.WithAddr("zap://0.0.0.0:9000"))
+    gen.RegisterCalculatorServer(srv, calc{})
+    log.Fatal(srv.ListenAndServe())
+}
+```
+
+Every parameter and return is a zero-copy ZAP buffer. `zap.Stream[T]` is the bidirectional half of an open call — `Observe` can push values until the client disconnects.
+
+## Client (Go)
+
+```go
+ctx := context.Background()
+
+client, _ := zap.Dial(ctx, "zap://calc.example:9000")
+defer client.Close()
+
+c := gen.NewCalculatorClient(client)
+
+sum, _ := c.Add(ctx, 10, 5)
+fmt.Println(sum)  // 15
+
+stream, _ := c.Observe(ctx, "ticker")
+for v := range stream.Recv(ctx) {
+    fmt.Println(v)
+}
+```
+
+## Capabilities
+
+Native ZAP RPC's killer feature: methods can return **capabilities** — references that the holder can call but cannot forge, transfer freely, and the issuer can revoke without changing keys.
+
+```
+# storage.zap
+interface Storage
+  open (path Text) -> (file File)
+
+interface File
+  read  (n UInt32) -> (bytes Data)
+  write (bytes Data) -> ()
+  close () -> ()
+```
+
+```go
+// Server: returning a capability
+func (s *storage) Open(ctx context.Context, path string) (gen.File, error) {
+    f, err := os.Open(path)
+    if err != nil { return nil, err }
+    return &fileHandle{f: f}, nil
+}
+```
+
+```go
+// Client: using a returned capability
+storage, _ := gen.NewStorageClient(client).Open(ctx, "/etc/hosts")
+data, _ := storage.Read(ctx, 1024)
+storage.Close(ctx)
+```
+
+Crucially, you can pass `storage` to a *different* peer over the same connection — they can read from `/etc/hosts` on the original server without ever holding the original client's identity. That's capability delegation. There is no equivalent in HTTP.
+
+## Multi-language clients
+
+The exact same schema generates working clients in every language. From a TypeScript client calling the Go server above:
+
+```ts
+import { Calculator } from './gen/calculator'
+import { connect } from '@zap-proto/zap'
+
+const client = await connect('zap://calc.example:9000')
+const calc = new Calculator(client)
+
+console.log(await calc.add(10, 5))            // 15
+for await (const v of calc.observe('ticker')) {
+  console.log(v)
+}
+```
+
+Python:
+
+```python
+from gen.calculator import Calculator
+from zap_proto import connect
+
+async with await connect('zap://calc.example:9000') as client:
+    calc = Calculator(client)
+    print(await calc.add(10, 5))            # 15
+    async for v in calc.observe('ticker'):
+        print(v)
+```
+
+Rust:
+
+```rust
+use zap_proto::Client;
+use gen::calculator::CalculatorClient;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let client = Client::connect("zap://calc.example:9000").await?;
+    let calc = CalculatorClient::new(client);
+
+    println!("{}", calc.add(10.0, 5.0).await?);   // 15
+    let mut stream = calc.observe("ticker").await?;
+    while let Some(v) = stream.next().await {
+        println!("{}", v?);
+    }
+    Ok(())
+}
+```
+
+## Authentication
+
+Connections are mutually KEM-authenticated by default. The peer's identity is bound to its keypair, not to a bearer token:
+
+```go
+srv := zap.NewServer(
+    zap.WithAddr("zap://0.0.0.0:9000"),
+    zap.WithIdentity(zap.LoadIdentity("./service.key")),
+    zap.WithAuthorize(func(peer zap.Peer, method string) error {
+        if peer.DID() != "did:zap:z6Mk..." && method == "Divide" {
+            return zap.ErrPermissionDenied
+        }
+        return nil
+    }),
+)
+```
+
+For unauthenticated services (public read-only endpoints), use `zap.WithAnonymous()`.
+
+## Performance
+
+Native ZAP RPC vs. gRPC over HTTP/2 on the same hardware, same calculator service:
+
+| Metric | gRPC / HTTP-2 | ZAP native | ratio |
+|---|---|---|---|
+| Call p50 | 38 µs | **2.1 µs** | 18× |
+| Call p99 | 240 µs | **6.4 µs** | 38× |
+| RSS / 10k conn | 580 MiB | **86 MiB** | 6.7× |
+| Calls/s (1 core) | 95k | **870k** | 9.2× |
+
+See [benchmarks](/docs/benchmarks) for the harness. The gap is mostly serializer cost — gRPC does protobuf encode/decode on every call, ZAP doesn't.
+
+## Related
+
+- [Protocol wire spec](/docs/protocol) — byte-for-byte format
+- [Architecture](/docs/architecture) — why capabilities, why content-addressed
+- [Transports](/docs/transports) — TCP, UDP+FEC, shared-memory, in-process
+- [Gateway](/docs/gateway) — translate native ZAP into HTTP/JSON for browsers
+- [SDKs](/docs/sdks) — per-language client + server libraries

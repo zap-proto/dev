@@ -2,6 +2,7 @@
   "title": "Protocols over ZAP",
   "pages": [
     "index",
+    "native",
     "http",
     "mcp",
     "a2a",

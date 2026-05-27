@@ -1,40 +1,47 @@
 ---
-title: Protocols over ZAP
-description: Higher-level protocols carried on the ZAP wire — HTTP, MCP, A2A, ACP, RNS, FIX, WS.
+title: Protocols
+description: Native ZAP RPC, and higher-level protocols carried on the ZAP wire.
 ---
 
-# Protocols over ZAP
+# Protocols
 
-ZAP is a wire format and capability-based RPC system. Real applications speak a *higher-level* protocol on top — HTTP for the web, MCP for agent tool-calls, FIX for trading, etc. Each of those protocols has a corresponding **channel implementation** that maps its message types onto ZAP frames.
+ZAP is a wire format and capability-based RPC system. You can use it two ways:
 
-The benefits over running these on classic transports:
+1. **Natively** — define your own `.zap` interfaces and let ZAP be the application protocol. This is the fastest path and the only one that gives you ZAP's full capability model (transferable, revocable references instead of bearer tokens).
+2. **As a carrier** — run a higher-level protocol (HTTP, MCP, FIX, …) on top of ZAP framing. Existing semantics, zero-copy buffers underneath, mutual KEM auth at the transport.
+
+## Choices
+
+| Protocol | Page | When to use |
+|---|---|---|
+| **Native ZAP RPC** | [native](/docs/protocols/native) | Greenfield service ↔ service, you want capabilities + min latency |
+| HTTP | [http](/docs/protocols/http) | Drop-in `net/http` replacement, existing HTTP clients keep working |
+| MCP | [mcp](/docs/protocols/mcp) | Agent tool-call channel, replaces stdio MCP |
+| A2A | [a2a](/docs/protocols/a2a) | Cross-vendor agent collaboration (Google A2A spec) |
+| ACP | [acp](/docs/protocols/acp) | FIPA-style structured speech acts between agents |
+| RNS | [rns](/docs/protocols/rns) | Service discovery bound to identity, not DNS |
+| FIX | [fix](/docs/protocols/fix) | FIX 4.4 / 5.0 trading, sub-µs p99 |
+| WS | [ws](/docs/protocols/ws) | Multi-stream pubsub, per-stream FEC, no head-of-line blocking |
+
+## Why carry HTTP / MCP / FIX over ZAP at all?
+
+If you already speak HTTP, why pipe it through ZAP? Because the carrier buys you things the higher-level protocol can't:
 
 - **Zero-copy at every hop** — the payload sits in shared-memory buffers from network read to handler dispatch. No serializer step between layers.
-- **One auth model** — mutual KEM-bound identity at the transport. The higher-level protocol inherits authentication for free; no per-layer JWT, no API keys, no cookies.
+- **One auth model** — mutual KEM-bound identity at the transport. The higher-level protocol inherits authentication; no per-layer JWT, no API keys, no cookies.
 - **One observability model** — every frame is signed and content-addressed. Wireshark sees the same flow your application sees.
-- **One framing layer** — multi-stream, FEC, no head-of-line blocking by default. The higher-level protocol doesn't re-invent it.
+- **One framing layer** — multi-stream, FEC, no head-of-line blocking. The higher-level protocol doesn't re-invent it.
 
-## Channels
-
-| Channel | Package | Replaces |
-|---|---|---|
-| [HTTP](/docs/protocols/http) | `github.com/zap-proto/http` | `net/http`, Express, FastAPI |
-| [MCP](/docs/protocols/mcp) | `github.com/zap-proto/mcp` | stdio MCP, websocket MCP |
-| [A2A](/docs/protocols/a2a) | `github.com/zap-proto/a2a` | Google Agent-to-Agent over HTTPS |
-| [ACP](/docs/protocols/acp) | `github.com/zap-proto/acp` | FIPA ACL |
-| [RNS](/docs/protocols/rns) | `github.com/zap-proto/rns` | DNS for services, mDNS, K8s DNS |
-| [FIX](/docs/protocols/fix) | `github.com/zap-proto/fix` | FIX 4.4 / 5.0 over SSL TCP |
-| [WS](/docs/protocols/ws) | `github.com/zap-proto/ws` | WebSocket, NATS, MQTT |
-
-All channel packages are Go-first (the reference implementations); polyglot clients can speak them via the per-language SDKs at [/docs/sdks](/docs/sdks).
-
-## Picking the right channel
+## Picking the right one
 
 | You need | Use |
 |---|---|
-| Drop-in replacement for `net/http.Handler` | `zap-proto/http` |
-| Agent tool-call channel (replacement for MCP-over-stdio) | `zap-proto/mcp` |
-| Cross-vendor agent messaging | `zap-proto/a2a` or `zap-proto/acp` |
-| Service discovery bound to identity, not DNS | `zap-proto/rns` |
-| Sub-µs trading | `zap-proto/fix` |
-| Pubsub with per-stream FEC, no head-of-line blocking | `zap-proto/ws` |
+| New internal service, full control of both ends | [Native ZAP RPC](/docs/protocols/native) |
+| Drop-in replacement for `net/http.Handler` | [HTTP](/docs/protocols/http) |
+| Agent tool-call channel | [MCP](/docs/protocols/mcp) |
+| Cross-vendor agent messaging | [A2A](/docs/protocols/a2a) or [ACP](/docs/protocols/acp) |
+| Service discovery bound to identity | [RNS](/docs/protocols/rns) |
+| Sub-µs trading | [FIX](/docs/protocols/fix) |
+| Pubsub with FEC | [WS](/docs/protocols/ws) |
+
+All Go reference implementations live under [github.com/zap-proto](https://github.com/zap-proto); polyglot clients speak them via the per-language [SDKs](/docs/sdks).

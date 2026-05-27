@@ -63,12 +63,13 @@ These are stand-alone wire codecs (no RPC layer) for embedding ZAP into other st
 | Compiler-plugin test framework | [zap-proto/test](https://github.com/zap-proto/test) |
 | Logos & brand assets | [zap-proto/logo](https://github.com/zap-proto/logo) |
 
-## Protocols over ZAP
+## Protocols
 
-ZAP carries higher-level protocols as channel implementations. Each is a separate package; pick the ones you need. See the [protocols section](/docs/protocols) for full guides.
+ZAP is both a native RPC system and a carrier for higher-level protocols. See the [protocols section](/docs/protocols) for full guides.
 
 | Protocol | Package | Repo | Guide |
 |---|---|---|---|
+| **Native ZAP RPC** | (any SDK) | — | [Native ZAP RPC](/docs/protocols/native) |
 | HTTP (net/http drop-in) | `github.com/zap-proto/http` | [zap-proto/http](https://github.com/zap-proto/http) | [HTTP over ZAP](/docs/protocols/http) |
 | MCP (Model Context Protocol) | `github.com/zap-proto/mcp` | [zap-proto/mcp](https://github.com/zap-proto/mcp) | [MCP over ZAP](/docs/protocols/mcp) |
 | A2A (Agent-to-Agent) | `github.com/zap-proto/a2a` | [zap-proto/a2a](https://github.com/zap-proto/a2a) | [A2A over ZAP](/docs/protocols/a2a) |

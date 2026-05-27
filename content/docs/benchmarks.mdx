@@ -83,9 +83,9 @@ The classic Cap'n-Proto-derived workload suite ported to the ZAP Rust SDK. Produ
 ```bash
 git clone https://github.com/zap-proto/rust
 cd rust
-./benchmark/bench.sh quick     # ~10 sec sanity
-./benchmark/bench.sh default   # original iteration counts, ~1 min
-./benchmark/bench.sh full      # 10× iterations, ~10 min
+bash ./benchmark/bench.sh quick     # ~10 sec sanity
+bash ./benchmark/bench.sh default   # original iteration counts, ~1 min
+bash ./benchmark/bench.sh full      # 10× iterations, ~10 min
 ```
 
 Each run writes one JSON file to `bench-results/$(hostname)-$(timestamp).json`. The schema is documented in [zap-proto/rust/benchmark/README.md](https://github.com/zap-proto/rust/blob/main/benchmark/README.md):

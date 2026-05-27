@@ -1,14 +1,27 @@
 // @ts-nocheck
-import * as __fd_glob_10 from "../content/docs/why-zap.mdx?collection=docs"
-import * as __fd_glob_9 from "../content/docs/transports.mdx?collection=docs"
-import * as __fd_glob_8 from "../content/docs/quick-start.mdx?collection=docs"
-import * as __fd_glob_7 from "../content/docs/protocol.mdx?collection=docs"
-import * as __fd_glob_6 from "../content/docs/index.mdx?collection=docs"
-import * as __fd_glob_5 from "../content/docs/gateway.mdx?collection=docs"
-import * as __fd_glob_4 from "../content/docs/consensus.mdx?collection=docs"
-import * as __fd_glob_3 from "../content/docs/benchmarks.mdx?collection=docs"
-import * as __fd_glob_2 from "../content/docs/architecture.mdx?collection=docs"
-import * as __fd_glob_1 from "../content/docs/api.mdx?collection=docs"
+import * as __fd_glob_23 from "../content/docs/sdks/typescript.mdx?collection=docs"
+import * as __fd_glob_22 from "../content/docs/sdks/rust.mdx?collection=docs"
+import * as __fd_glob_21 from "../content/docs/sdks/python.mdx?collection=docs"
+import * as __fd_glob_20 from "../content/docs/sdks/ocaml.mdx?collection=docs"
+import * as __fd_glob_19 from "../content/docs/sdks/java.mdx?collection=docs"
+import * as __fd_glob_18 from "../content/docs/sdks/index.mdx?collection=docs"
+import * as __fd_glob_17 from "../content/docs/sdks/haskell.mdx?collection=docs"
+import * as __fd_glob_16 from "../content/docs/sdks/go.mdx?collection=docs"
+import * as __fd_glob_15 from "../content/docs/sdks/erlang.mdx?collection=docs"
+import * as __fd_glob_14 from "../content/docs/sdks/csharp.mdx?collection=docs"
+import * as __fd_glob_13 from "../content/docs/sdks/cpp.mdx?collection=docs"
+import * as __fd_glob_12 from "../content/docs/sdks/c.mdx?collection=docs"
+import * as __fd_glob_11 from "../content/docs/why-zap.mdx?collection=docs"
+import * as __fd_glob_10 from "../content/docs/transports.mdx?collection=docs"
+import * as __fd_glob_9 from "../content/docs/quick-start.mdx?collection=docs"
+import * as __fd_glob_8 from "../content/docs/protocol.mdx?collection=docs"
+import * as __fd_glob_7 from "../content/docs/index.mdx?collection=docs"
+import * as __fd_glob_6 from "../content/docs/gateway.mdx?collection=docs"
+import * as __fd_glob_5 from "../content/docs/consensus.mdx?collection=docs"
+import * as __fd_glob_4 from "../content/docs/benchmarks.mdx?collection=docs"
+import * as __fd_glob_3 from "../content/docs/architecture.mdx?collection=docs"
+import * as __fd_glob_2 from "../content/docs/api.mdx?collection=docs"
+import { default as __fd_glob_1 } from "../content/docs/sdks/meta.json?collection=docs"
 import { default as __fd_glob_0 } from "../content/docs/meta.json?collection=docs"
 import { server } from '@hanzo/docs-mdx/runtime/server';
 import type * as Config from '../source.config';
@@ -18,4 +31,4 @@ const create = server<typeof Config, import("@hanzo/docs-mdx/runtime/types").Int
   }
 }>({"doc":{"passthroughs":["extractedReferences"]}});
 
-export const docs = await create.docs("docs", "content/docs", {"meta.json": __fd_glob_0, }, {"api.mdx": __fd_glob_1, "architecture.mdx": __fd_glob_2, "benchmarks.mdx": __fd_glob_3, "consensus.mdx": __fd_glob_4, "gateway.mdx": __fd_glob_5, "index.mdx": __fd_glob_6, "protocol.mdx": __fd_glob_7, "quick-start.mdx": __fd_glob_8, "transports.mdx": __fd_glob_9, "why-zap.mdx": __fd_glob_10, });
+export const docs = await create.docs("docs", "content/docs", {"meta.json": __fd_glob_0, "sdks/meta.json": __fd_glob_1, }, {"api.mdx": __fd_glob_2, "architecture.mdx": __fd_glob_3, "benchmarks.mdx": __fd_glob_4, "consensus.mdx": __fd_glob_5, "gateway.mdx": __fd_glob_6, "index.mdx": __fd_glob_7, "protocol.mdx": __fd_glob_8, "quick-start.mdx": __fd_glob_9, "transports.mdx": __fd_glob_10, "why-zap.mdx": __fd_glob_11, "sdks/c.mdx": __fd_glob_12, "sdks/cpp.mdx": __fd_glob_13, "sdks/csharp.mdx": __fd_glob_14, "sdks/erlang.mdx": __fd_glob_15, "sdks/go.mdx": __fd_glob_16, "sdks/haskell.mdx": __fd_glob_17, "sdks/index.mdx": __fd_glob_18, "sdks/java.mdx": __fd_glob_19, "sdks/ocaml.mdx": __fd_glob_20, "sdks/python.mdx": __fd_glob_21, "sdks/rust.mdx": __fd_glob_22, "sdks/typescript.mdx": __fd_glob_23, });

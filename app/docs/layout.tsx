@@ -1,7 +1,6 @@
 import { source } from '@/lib/source';
 import { DocsLayout } from '@hanzo/docs-radix-ui/layouts/docs';
 import type { ReactNode } from 'react';
-import { Zap } from 'lucide-react';
 
 export default function Layout({ children }: { children: ReactNode }) {
   return (
@@ -10,7 +9,7 @@ export default function Layout({ children }: { children: ReactNode }) {
       nav={{
         title: (
           <div className="flex items-center gap-2">
-            <Zap className="w-5 h-5 text-blue-500" />
+            <span className="inline-block rotate-[-15deg]" aria-hidden>⚡</span>
             <span className="font-bold">ZAP Protocol</span>
           </div>
         ),

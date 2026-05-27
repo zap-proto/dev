@@ -1,0 +1,71 @@
+---
+title: Ecosystem
+description: Open-source services using ZAP — production users, libraries, and demos.
+---
+
+# Ecosystem
+
+Open-source services that depend on ZAP directly. The list below is grepped from public `go.mod` / `Cargo.toml` / `package.json` files and verified to actually link ZAP packages (not just mention them in docs).
+
+## Native ZAP RPC
+
+Services that use `github.com/zap-proto/go` directly as their application protocol.
+
+| Service | Repo | Role |
+|---|---|---|
+| **Hanzo PubSub** | [hanzoai/pubsub](https://github.com/hanzoai/pubsub) | Native ZAP RPC for the pubsub control plane; payload framing on the data plane |
+| **Hanzo Storage** | [hanzoai/storage](https://github.com/hanzoai/storage) | Native RPC between storage shards; capability-passing for cross-shard reads |
+| **Hanzo Tasks** | [hanzoai/tasks](https://github.com/hanzoai/tasks) | Native RPC between scheduler ↔ worker pool; task handles are ZAP capabilities |
+| **Hanzo Playground** | [hanzoai/playground](https://github.com/hanzoai/playground) | Sandboxed runner ↔ host control surface |
+| **Hanzo Base-HA** | [hanzoai/base-ha](https://github.com/hanzoai/base-ha) | Cross-replica state-machine replication |
+
+## HTTP over ZAP
+
+Services using [`zap-proto/http`](https://github.com/zap-proto/http) — the `net/http` drop-in.
+
+| Service | Repo | Role |
+|---|---|---|
+| **Hanzo Gateway** | [hanzoai/gateway](https://github.com/hanzoai/gateway) | API gateway terminating user HTTP, proxying upstream over ZAP-HTTP |
+| **Hanzo Ingress** | [hanzoai/ingress](https://github.com/hanzoai/ingress) | L7 reverse proxy, serves ZAP-HTTP on the cluster-internal hop |
+| **Hanzo Cloud** | [hanzoai/cloud](https://github.com/hanzoai/cloud) | Internal cloud control plane |
+| **Lux ZAP** | [luxfi/zap](https://github.com/luxfi/zap) | Lux-network reference integration |
+
+## Libraries & tooling
+
+| Project | Repo | Description |
+|---|---|---|
+| **Hanzo zap-es** | [hanzoai/zap-es](https://github.com/hanzoai/zap-es) (mirror of [zap-proto/zap-es](https://github.com/zap-proto/zap-es)) | Cap'n-Proto-style wire encoder for TypeScript |
+| **Hanzo Marketing** | [hanzoai/marketing](https://github.com/hanzoai/marketing) | Static-site build pipeline (uses ZAP-HTTP for the rebuild trigger hook) |
+
+## Reference implementations
+
+These are the canonical SDKs themselves — listed because they're also OSS services in their own right:
+
+| Package | Repo |
+|---|---|
+| Go reference | [zap-proto/go](https://github.com/zap-proto/go) |
+| Rust reference | [zap-proto/rust](https://github.com/zap-proto/rust) |
+| TypeScript | [zap-proto/ts](https://github.com/zap-proto/ts) |
+| Python | [zap-proto/py](https://github.com/zap-proto/py) |
+| C++ | [zap-proto/cpp](https://github.com/zap-proto/cpp) |
+| All others | [github.com/zap-proto](https://github.com/zap-proto) (33 repos) |
+
+## Adding your service
+
+If you're shipping a public service or library that links ZAP packages, open a PR against [zap-proto/dev](https://github.com/zap-proto/dev) — single line in this ecosystem page. We don't gatekeep; we just want a public repo + a real `go.mod` / `Cargo.toml` / `package.json` entry.
+
+Production but private deployments are tracked separately under the case-studies workstream — reach out at hello@zap-proto.io.
+
+## Performance reference points
+
+These deployments share their numbers on the [benchmarks page](/docs/benchmarks):
+
+- **Hanzo Gateway** — 1.1M req/s per gateway pod (8 cores), p99 < 200 µs at the edge
+- **Hanzo PubSub** — 1.8M msg/s per broker, 22 µs p99 fan-out latency
+- **Hanzo Tasks** — task-handle capability passing across 10k concurrent workers, no serializer hot spot
+
+## Related
+
+- [SDKs](/docs/sdks) — pick your language and start shipping
+- [Protocols](/docs/protocols) — native ZAP vs. carrier protocols
+- [Benchmarks](/docs/benchmarks) — apples-to-apples vs. classical alternatives

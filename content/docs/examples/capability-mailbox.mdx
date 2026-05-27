@@ -1,0 +1,105 @@
+---
+title: Capability mailbox
+description: Distinct posting + reading caps. Holders use but can't forge. Revocation without rotating identities.
+---
+
+# Capability mailbox
+
+A mailbox you can hand out — `PostCap` to anyone you want to write into it, `ReadCap` to whoever empties it. Holders of `PostCap` cannot read. Holders of `ReadCap` cannot post. The owner can revoke any cap at any time without changing keys.
+
+This is the ZAP capability model distilled to 100 lines. The over-the-wire version uses the same shape — the cap is a reference that the holder can call but cannot forge.
+
+Source: [zap-proto/rns/examples/04_capability_mailbox](https://github.com/zap-proto/rns/tree/main/examples/04_capability_mailbox)
+
+## Run it
+
+```bash
+git clone https://github.com/zap-proto/rns && cd rns
+go run ./examples/04_capability_mailbox
+```
+
+## Output
+
+```
+== Capability mailbox demo ==
+✓ alice posts
+✓ bob posts
+owner reads 2 messages: [hello from alice hi mom]
+✓ alice's revoked cap rejected: capability revoked
+✓ bob still posts
+
+final mailbox contents (3):
+  [0] hello from alice
+  [1] hi mom
+  [2] bob is fine
+```
+
+## Walkthrough
+
+```go
+mb := NewMailbox()
+
+postCap1 := mb.IssuePostCap()   // for alice
+postCap2 := mb.IssuePostCap()   // for bob
+readCap  := mb.IssueReadCap()   // for the owner
+
+// Alice and Bob each hold a *PostCap. Neither can Read.
+//   postCap1.Read()  // doesn't compile — Read isn't a method on PostCap
+//   postCap1.Post("hello")  // ok
+```
+
+Each cap is a thin shim:
+
+```go
+type PostCap struct {
+    mb  *Mailbox
+    cap *capability  // unexported — receiver doesn't get to construct one
+}
+
+func (p *PostCap) Post(msg string) error {
+    if p.cap.revoked { return ErrRevoked }
+    p.mb.append(msg)
+    return nil
+}
+```
+
+A `PostCap` exposes exactly one operation. The mailbox is reachable through it but can't be extracted. Construct one yourself? The `cap` field is unexported. Forge an ID? You'd need to be inside the `rns` package.
+
+## Revocation without rotation
+
+```go
+mb.Revoke(postCap1.cap)        // alice's cap is now disabled
+postCap1.Post("alice tries again")
+// → ErrRevoked: capability revoked
+
+postCap2.Post("bob is fine")
+// → ok — bob's cap is independent
+```
+
+No keys rotated. No identities replaced. Revoking one cap doesn't touch any other.
+
+In a token-based system, equivalent revocation requires either a denylist check on every request (a bandwidth, latency, and consistency tax) or a key rotation that breaks every other holder. The cap model gets revocation for free.
+
+## Why this matters
+
+Capabilities are the alternative to bearer tokens. With bearer tokens:
+- Holder identity is *whoever currently has the token*. Anyone who can steal a token can act as the holder.
+- "Read-only token" and "write token" require a second authorization layer; the server checks the token's claims on every call.
+- Revocation requires either short token TTLs (with the inevitable refresh dance) or a denylist consulted on every call.
+
+With capabilities:
+- The cap *is* the right. Holding it is using it. No claims-parsing required.
+- Different rights are different objects. There is no read-token-that-might-also-allow-writes.
+- Revocation flips a single bit owned by the issuer. Nobody else's caps move.
+
+In native ZAP RPC, a method that returns a capability sends a wire-level reference that the receiver can call. The receiver can pass that reference to a *third* peer over the same connection — and the third peer can call it without ever holding the original receiver's identity. That's capability delegation. There is no equivalent in HTTP.
+
+## Translation to wire ZAP
+
+The Go example above runs in-process. The wire version is the same shape — `IssuePostCap` returns a `Capability<PostCap>` reference, and the receiver calls `.Post()` over a ZAP message round-trip. The wire-level handshake binds the cap to the channel; the channel binds to a PQ identity via [PQ-RNS](/docs/protocols/rns). The cap is unforgeable for the same reason a memory address inside one process can't be guessed from outside.
+
+## Related
+
+- [Native ZAP RPC](/docs/protocols/native) — capabilities returned over the wire
+- [/docs/architecture](/docs/architecture) — why capabilities, not bearer tokens
+- [PQ-RNS](/docs/protocols/rns) — how identities anchor cap-holding peers

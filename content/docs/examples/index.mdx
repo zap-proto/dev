@@ -1,0 +1,36 @@
+---
+title: Overview
+description: Runnable, end-to-end examples — PQ-RNS round-trip, cross-language conformance, capability-passing.
+---
+
+# Examples
+
+Concrete things you can `go run` or copy-paste. Every example here is real source in a repo, not a sketch — the URL after each title is the canonical commit.
+
+| Example | What it shows |
+|---|---|
+| [PQ-RNS round-trip](/docs/examples/pq-rns-roundtrip) | Registry signs a Record → resolver returns it → client verifies → DID derives → ready to dial |
+| [Cross-language conformance](/docs/examples/multi-lang-conformance) | Run the DID KAT in Go, Rust, Python, Node — all four reproduce the same DID |
+| [Capability mailbox](/docs/examples/capability-mailbox) | A drop-box where the holder of a capability can post but not read — pure ZAP cap semantics |
+
+Each example fits in a single file. If something here doesn't compile or doesn't run, that's a bug — open an issue against [zap-proto/dev](https://github.com/zap-proto/dev).
+
+## Quick sanity check
+
+The smallest possible "is ZAP working" test:
+
+```bash
+go install github.com/zap-proto/rns/examples/01_compute_did@latest
+01_compute_did
+```
+
+Output:
+```
+== PQ-RNS DID derivation ==
+kem pk (first 16 bytes): 352744dfbe14d2d70056a319d6aa7a68 ...
+sig pk (first 16 bytes): 5067f5f9a5777725dfadc21acee4033f ...
+
+did:zap:l72zl3smczdgrmuttpp3yespcoxmwdy5kd2b3kykmw6jz6e4ztsq
+```
+
+You changed the seed strings? The DID changes. You ran it on a different machine? Same output. That's the floor of conformance.

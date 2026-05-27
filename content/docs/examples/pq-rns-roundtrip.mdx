@@ -1,0 +1,94 @@
+---
+title: PQ-RNS round-trip
+description: A registry signs a Record, a resolver returns it, a client verifies and derives the DID.
+---
+
+# PQ-RNS round-trip
+
+The smallest possible end-to-end PQ-RNS flow in ~100 lines: a registry signs a `Record` binding `"acme.payments"` to a `(kemPubKey, sigPubKey)` keypair; a resolver returns it; a client verifies the registry signature, checks the validity window, and derives the canonical DID.
+
+Source: [zap-proto/rns/examples/03_signed_record_roundtrip](https://github.com/zap-proto/rns/tree/main/examples/03_signed_record_roundtrip)
+
+## Run it
+
+```bash
+git clone https://github.com/zap-proto/rns && cd rns
+go run ./examples/03_signed_record_roundtrip
+```
+
+## Output
+
+```
+== resolver returned a signed Record ==
+size on wire: 4542 bytes
+✓ registry signature verifies
+✓ record is within validity window
+
+resolved "acme.payments" to:
+  did:zap:hinpjpe3wfxdl2zddobp5kgei7rrzaxnaawsocxniqaxvkjfwdpa
+
+client can now dial this identity. The handshake will
+reuse kem pk (first 16 bytes: ef303d128f25f841030eb315c50e55ef ...)
+```
+
+## What's happening
+
+```go
+// 1. Registry generates a long-lived signing key (published OOB).
+regPubKey, regPrivKey, _ := ed25519.GenerateKey(rand.Reader)
+
+// 2. The service "acme.payments" has a PQ identity.
+kemPK := derive("acme.kem", 1216) // X-Wing static pk (1216 bytes)
+sigPK := derive("acme.sig", 1984) // hybrid sig pk (Ed25519 + ML-DSA-65)
+
+// 3. Registry constructs and signs a Record.
+record := Record{
+    Name:      "acme.payments",
+    KEMPubKey: kemPK,
+    SigPubKey: sigPK,
+    TTL:       300,
+    NotBefore: time.Now().UnixNano(),
+    NotAfter:  time.Now().Add(24 * time.Hour).UnixNano(),
+    Registry:  "did:zap:registry-alpha",
+}
+record.Signature = signRecord(record, regPrivKey)
+```
+
+The record now travels over any network — `json.Marshal` here for clarity; the wire schema is at [zap-proto/rns/schema/zap_rns.zap](https://github.com/zap-proto/rns/blob/main/schema/zap_rns.zap) for production.
+
+A client receives the record and:
+
+```go
+// 4. Verify the registry signed it.
+err := verifyRecord(got, regPubKey)
+// ✓ registry signature verifies
+
+// 5. Check time window.
+if time.Now().UnixNano() < got.NotBefore || time.Now().UnixNano() > got.NotAfter { ... }
+// ✓ record is within validity window
+
+// 6. Derive the addressable identity.
+did := rns.ComputeDID(got.KEMPubKey, got.SigPubKey)
+// did:zap:hinpjpe3wfxdl2zddobp5kgei7rrzaxnaawsocxniqaxvkjfwdpa
+```
+
+The client can now dial that DID. The dial reuses `got.KEMPubKey` as the recipient pk in the X-Wing handshake — the resulting channel is *bound to the resolved identity* end-to-end. No CA, no DNS, no separate cert.
+
+## Try it dirty
+
+In a second terminal, change the registry pubkey before verifying:
+
+```go
+// Simulate a forged record: client trusts the wrong registry key.
+wrongPub, _, _ := ed25519.GenerateKey(rand.Reader)
+err := verifyRecord(got, wrongPub)
+// FAILURE: signature verify: registry signature failed verification
+```
+
+That's it. Without the registry's public key, you can't accept a record. With it, you don't need any other party.
+
+## Related
+
+- [/docs/protocols/rns](/docs/protocols/rns) — full protocol detail
+- [/docs/post-quantum](/docs/post-quantum) — KEM, identity, name-service layers
+- Try also: [02_dual_identity_collision](https://github.com/zap-proto/rns/tree/main/examples/02_dual_identity_collision) — shows that key rotation always produces a fresh DID, and why you use Records instead of DID-equality to track "same service" across rotations.

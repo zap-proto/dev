@@ -1,217 +1,86 @@
 ---
 title: Benchmarks
-description: Real-world performance benchmarks for ZAP Protocol across AI agents, blockchain VMs, and distributed systems.
+description: Honest performance numbers from the zap-proto/bench harness.
 ---
 
 # Benchmarks
 
-ZAP is designed for the most demanding use cases in AI and crypto infrastructure. These are **real benchmarks** measured on Apple M1 Max.
+Every number on this page is reproducible from [zap-proto/bench](https://github.com/zap-proto/bench). If a claim isn't traceable to a benchmark file checked into that repo, it doesn't live here. We've burned trust with fabricated tables before; this page exists as an antidote.
 
-## The Infinity Benchmark
+## What's measured today
 
-<img src="/benchmark.svg" alt="ZAP vs Protobuf benchmark" className="w-full max-w-lg mx-auto my-8" />
+The current harness (`bench_test.go`) measures **HTTP/1.1+JSON vs ZAP-binary** across four workload sizes: tiny (16 B body, 4 headers), small (256 B, 8 headers), medium (4 KiB, 12 headers), large (64 KiB, 8 headers). Source: [bench_test.go](https://github.com/zap-proto/bench/blob/main/bench_test.go). Raw output: [bench-results.txt](https://github.com/zap-proto/bench/blob/main/bench-results.txt).
 
-This benchmark measures encoding/decoding round-trip time in memory. ZAP achieves **0µs** because there is no encoding step — the in-memory format IS the wire format.
+### Single-client throughput
 
-> "But that's unfair!" — Yes, that's the point. ZAP eliminates the problem entirely.
+5000 sequential requests, single TCP connection, keep-alive.
 
----
+| Workload | HTTP/1.1+JSON | ZAP-binary | ratio |
+|---|---|---|---|
+| tiny (16 B) | 12,202 req/s | 11,232 req/s | 0.92× |
+| small (256 B) | 8,822 req/s | 9,892 req/s | **1.12×** |
+| medium (4 KiB) | 7,487 req/s | 7,582 req/s | 1.01× |
+| large (64 KiB) | 3,875 req/s | 1,920 req/s | 0.50× |
 
-## Measured Results
+### Concurrent throughput (32 in-flight)
 
-All benchmarks run on Apple M1 Max with Go 1.25 and Python 3.14. [Run them yourself →](https://github.com/zap-proto/benchmarks)
+32 concurrent workers × 1000 requests each.
 
-### Serialization Performance
+| Workload | HTTP/1.1+JSON | ZAP-binary | ratio |
+|---|---|---|---|
+| small | 34,411 req/s | 30,868 req/s | 0.90× |
+| medium | 15,503 req/s | 13,907 req/s | 0.90× |
 
-| Operation | JSON | ZAP | Speedup | JSON Allocs | ZAP Allocs |
-|-----------|------|-----|---------|-------------|------------|
-| Tool call encode | 385ns | **18ns** | 21x | 2 | **0** |
-| Tool call decode | 1,746ns | **31ns** | 56x | 15 | **1** |
-| Round-trip | 2,142ns | **48ns** | 45x | 17 | **1** |
-| Message routing | 2,122ns | **3.2ns** | **656x** | 17 | **0** |
-| Batch 100 messages | 37µs | **1.8µs** | 21x | 300 | **0** |
-| Large message (32KB) | 37µs | **4.6µs** | 8x | 2 | **1** |
+### Wire bytes
 
-### Blockchain & Consensus
+How big is the request on the wire?
 
-| Operation | JSON | ZAP | Speedup | JSON Allocs | ZAP Allocs |
-|-----------|------|-----|---------|-------------|------------|
-| Warp message encode | 3.7µs | **53ns** | **70x** | 2 | **0** |
-| Warp message decode | 20µs | **82ns** | **244x** | 34 | **1** |
-| Consensus vote | 489ns | **0.34ns** | **1,438x** | 1 | **0** |
-| 1000 attestations | 421µs | **1.8µs** | **234x** | 2 | **0** |
-| Validator set (100) | 28µs | **284ns** | **99x** | 2 | **0** |
-| Random state access | 707µs | **0.96ns** | **736,458x** | 11,011 | **0** |
+| Workload | HTTP bytes | ZAP bytes | ratio |
+|---|---|---|---|
+| tiny | 222 | 196 | **0.88×** (ZAP smaller) |
+| small | 478 | 444 | 0.93× |
+| medium | 4,322 | 4,388 | 1.02× |
+| large | 65,844 | 66,196 | 1.01× |
 
-### AI Agent Communication
+## What the numbers say
 
-| Scenario | JSON-RPC | ZAP | Speedup |
-|----------|----------|-----|---------|
-| 20 agents × 50 tool calls | 12.48ms | **6.21ms** | 2x |
-| Per-call latency | 9.64µs | **3.56µs** | 2.7x |
-| Memory (100 MCP servers) | 825 MB | **2.4 MB** | **341x** |
+The honest read:
 
-### Distributed Inference
+- **At small payloads ZAP is mildly faster** and uses ~10% fewer wire bytes than HTTP+JSON. Wins are modest.
+- **At medium payloads it's a tie.** Both are dominated by socket and OS overhead.
+- **At large payloads (64 KiB) ZAP loses by 2×** — the current ZAP-HTTP path has higher allocations and an extra copy in the hot loop. Optimization work is queued; results will land here when re-measured.
+- **Under concurrency 32, ZAP loses 10%** uniformly. The hot path doesn't yet take advantage of arena pooling that the encoder is capable of.
 
-| Operation | JSON | ZAP | Speedup |
-|-----------|------|-----|---------|
-| KV cache shard (1MB) | 22.6ms | **0.024ms** | **926x** |
-| Batch prompts (32×512) | 4,049µs | **20µs** | **200x** |
-| Speculative decode verify | 5.46µs | **0.026µs** | **210x** |
+The hand-wavy "10× faster than gRPC" / "1438× faster consensus" tables that lived here before were not measured. They were aspirational claims dressed as data. Removed.
 
----
+## Where ZAP actually wins today
 
-## Memory Efficiency
+Performance is not the strongest argument for ZAP in 2026. The stronger arguments — supported by mechanism, not by µs — are:
 
-ZAP's arena allocation and zero-copy access provide consistent memory behavior:
+1. **One wire format, many protocols.** [HTTP](/docs/protocols/http), [MCP](/docs/protocols/mcp), [A2A](/docs/protocols/a2a), [FIX](/docs/protocols/fix) all ride the same framing. One observability story, one auth story, one cipher suite to audit.
+2. **PQ at the transport.** [IETF X-Wing](/docs/post-quantum) is the default. Browsers got `X25519MLKEM768` in 2025; ZAP gives you the same KEM directly inside your application protocol, not just terminated at the edge.
+3. **Capabilities, not tokens.** [The capability mailbox example](/docs/examples/capability-mailbox) shows what's structurally impossible to express in HTTP: a reference that the holder can call but cannot forge, transferable to a third peer, revocable without rotating keys.
+4. **PQ-RNS.** [Name resolution that doesn't trust a CA.](/docs/protocols/rns) The KEM key in the resolved Record is the key the client dials — no separate cert chain.
 
-| Metric | JSON | ZAP | Improvement |
-|--------|------|-----|-------------|
-| Allocations per message | 17 | **0-1** | 94% reduction |
-| 100 MCP server overhead | 825 MB | **2.4 MB** | 99.7% reduction |
-| Memory fragmentation | High | **None** | Eliminated |
-| GC pressure | Severe | **Minimal** | Predictable latency |
-| Cache locality | Poor | **Excellent** | Faster access |
+These are the levers. When the harness produces wins on µs/req, they'll land here, sourced from the run.
 
-### Why Memory Matters
+## Run it yourself
 
-Traditional JSON-RPC with 100 MCP servers:
-- Each server: separate process (~8MB)
-- Pipe buffers: ~256KB per connection
-- Per-message allocations: 17 heap allocs
-- **Total: 825 MB just for connections**
-
-ZAP with single router:
-- One router process (~2MB)
-- Shared arena buffer (64KB)
-- Per-message allocations: **0**
-- **Total: 2.4 MB for same 100 servers**
-
-```
-Claude Code (100 MCP): ████████████████████████████████████████ 825 MB
-Hanzo ZAP Router:      █ 2.4 MB
-
-341x less memory. Same functionality.
+```bash
+git clone https://github.com/zap-proto/bench
+cd bench
+go test -v -run Test 2>&1 | tee my-bench-results.txt
 ```
 
-### Memory-Mapped Files
-
-ZAP files can be memory-mapped for instant access to any field:
-
-```go
-// Map a 10GB state file
-data, _ := mmap.Open("blockchain_state.zap")
-defer data.Close()
-
-// Access any field instantly — OS pages in only what you touch
-account := state.Root().Accounts().Get(address)
-balance := account.Balance()  // Only this 4KB page is loaded
-
-// JSON would require parsing all 10GB first
-```
-
-Measured: **707µs** (JSON parse + access) vs **0.96ns** (ZAP mmap access) = **736,458x faster**
-
----
-
-## Zero Allocations
-
-The key to ZAP's performance isn't just speed—it's **zero heap allocations**.
-
-```
-JSON encode:     2 allocs/op    272 B/op
-ZAP encode:      0 allocs/op      0 B/op  ← No heap activity
-
-JSON decode:    15 allocs/op    640 B/op
-ZAP decode:      1 allocs/op     48 B/op  ← Just the result slice
-
-JSON batch 100: 300 allocs/op   30KB/op
-ZAP batch 100:    0 allocs/op      0 B/op  ← Arena reuse
-```
-
-Why this matters:
-- **No GC pauses**: Zero allocations = zero garbage collection
-- **Predictable latency**: No surprise GC stalls in hot paths
-- **Better cache utilization**: Data stays in L1/L2 cache
-- **Linear scaling**: Batch operations don't multiply allocations
-
----
-
-## Code Size
-
-ZAP generates minimal code compared to other formats:
-
-| Format | Generated code (1000 types) |
-|--------|----------------------------|
-| Protobuf | ~2.5 MB |
-| FlatBuffers | ~1.8 MB |
-| ZAP | **~150 KB** |
-
-Smaller generated code means:
-- Faster compilation
-- Smaller binaries
-- Better instruction cache utilization
-- Easier auditing
-
----
+Tweak the workloads in `bench_test.go`. Hardware will move the numbers; the **ratios** should be reproducible across machines.
 
 ## Methodology
 
-### Test Environment
-- **CPU**: Apple M1 Max (10 cores)
-- **Memory**: 32GB unified
-- **OS**: macOS 14
-- **Go**: 1.25.6
-- **Python**: 3.14.2
+- Single host, loopback (`127.0.0.1`)
+- Both HTTP and ZAP use bufio readers/writers sized 64 KiB
+- TCP `NoDelay = true` on both
+- Persistent keep-alive connections (no per-request TCP establishment)
+- 5000-request warm window, allocs/GC measured via runtime/metrics
+- Both servers are minimal echo handlers — what you're measuring is framing overhead, not application logic
 
-### What We Measure
-
-**Encoding time**: Time to convert in-memory structures to wire format.
-- JSON: `json.Marshal()` call
-- ZAP: Direct struct pack to buffer
-
-**Decoding time**: Time to make wire data accessible.
-- JSON: `json.Unmarshal()` + field access
-- ZAP: Pointer arithmetic + bounds check
-
-**Allocations**: Heap allocations per operation.
-- Measured via Go's `testing.B.ReportAllocs()`
-- Critical for GC-sensitive workloads
-
-### The "Unfair" Advantage
-
-ZAP benchmarks look unfair because they are. Traditional formats force you to:
-
-1. **Serialize** — Convert memory to bytes
-2. **Transmit** — Send bytes over network/IPC
-3. **Deserialize** — Parse bytes back to memory
-
-ZAP eliminates steps 1 and 3. The wire format IS the memory format.
-
-This isn't cheating — it's better engineering.
-
----
-
-## Run Your Own Benchmarks
-
-```bash
-# Clone the benchmark suite
-git clone https://github.com/zap-proto/benchmarks
-cd benchmarks
-
-# Install dependencies
-make setup
-
-# Run all benchmarks
-make bench
-
-# Run specific benchmark suite
-make bench-serialize    # Go serialization
-make bench-blockchain   # Warp messaging, consensus
-make bench-agents       # MCP, multi-agent
-make bench-inference    # Distributed AI
-```
-
-Results are written to `results/` in JSON format.
-
-See the [benchmark repository](https://github.com/zap-proto/benchmarks) for full methodology and reproducible results.
+This is *not* a comprehensive perf suite. It's a single, honest harness in-tree. Native-ZAP-vs-gRPC, MCP-bridge-vs-stdio, FIX-vs-FIX-over-TCP — each needs its own harness, each is roadmap work, each will be added to this page when the harness file exists in [zap-proto/bench](https://github.com/zap-proto/bench).

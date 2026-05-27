@@ -1,0 +1,95 @@
+---
+title: Cross-language conformance
+description: Run the PQ-RNS DID KAT in Go, Python, Node, and Rust — every language reproduces the same DID.
+---
+
+# Cross-language conformance
+
+The PQ-RNS DID KAT is the conformance floor for every SDK. Same canonical inputs go in, same DID comes out, regardless of language.
+
+**Canonical inputs**:
+- `kemPubKey` = 1216 bytes of `0x01`
+- `sigPubKey` = 1984 bytes of `0x02`
+
+**Canonical SHA3-256**: `72bea58547e3f741a524771bf3a895948b83cad7f6706820bb9a08c4b026cfca`
+
+**Canonical DID**: `did:zap:ok7klbkh4p3udjjeo4n7hkevssfyhswx6zygqif3tiemjmbgz7fa`
+
+A test that doesn't reproduce this exact DID — wrong hash, wrong byte order, wrong base32 alphabet, or wrong casing — fails. That's the floor.
+
+## Run the matrix yourself
+
+```bash
+# Go
+git clone https://github.com/zap-proto/rns && cd rns
+go test ./...
+# PASS: TestDIDKAT
+
+# TypeScript / Node
+cd ../  && git clone https://github.com/zap-proto/ts && cd ts
+pnpm install && pnpm test test/pqrns_did.test.ts
+# PQ-RNS DID KAT ✓ reproduces canonical DID from fixed inputs
+
+# Python
+cd ../  && git clone https://github.com/zap-proto/py && cd py
+pip install -e . && pytest tests/test_pqrns_did.py
+# tests/test_pqrns_did.py::test_pqrns_did_kat PASSED
+
+# Rust
+cd ../  && git clone https://github.com/zap-proto/rust && cd rust
+cargo test pqrns_did
+# test pqrns_did_kat ... ok
+```
+
+All four pass against the same `pqrns_kat.json` fixture (a copy of which ships in each repo).
+
+## The whole thing in 30 lines
+
+Here's the Python version — the others are isomorphic:
+
+```python
+import base64, hashlib, json, pathlib
+
+KAT = json.loads(pathlib.Path("pqrns_kat.json").read_text())["did_canonical"]
+
+def compute_did(kem_pubkey: bytes, sig_pubkey: bytes) -> str:
+    h = hashlib.sha3_256(kem_pubkey + sig_pubkey).digest()
+    enc = base64.b32encode(h).decode().rstrip("=").lower()
+    return "did:zap:" + enc
+
+kem_pk = bytes.fromhex(KAT["inputs"]["kem_pubkey_hex"])
+sig_pk = bytes.fromhex(KAT["inputs"]["sig_pubkey_hex"])
+got = compute_did(kem_pk, sig_pk)
+
+assert got == KAT["outputs"]["did"], f"diverged: {got}"
+print("OK:", got)
+```
+
+Same algorithm:
+1. Concatenate `kemPubKey ‖ sigPubKey`
+2. SHA3-256
+3. Base32 lowercase, no padding (RFC 4648)
+4. Prepend `"did:zap:"`
+
+## Why this matters
+
+A name service that cannot guarantee bit-for-bit interop across implementations is a name service that cannot be trusted. If a TS client and a Go server disagree on what DID a `(kemPk, sigPk)` produces, they cannot establish identity — even when they share the underlying keys.
+
+The KAT is the smallest possible contract that prevents that. A new language port: copy `pqrns_kat.json`, write 30 lines of `compute_did`, run the test. If it passes, your implementation interops with every other SDK that passes the same test.
+
+## Authoring a new language port
+
+The vector lives at [`zap-proto/rns/testdata/pqrns_kat.json`](https://github.com/zap-proto/rns/blob/main/testdata/pqrns_kat.json). It's RFC 4648 base32 lowercase, no padding — most languages have stdlib support; common pitfalls:
+
+- **Default base32 has padding** (`=` at the end). Strip them.
+- **Default base32 is uppercase**. Lowercase the result.
+- **Wrong alphabet**: RFC 4648 is `abcdefghijklmnopqrstuvwxyz234567`, *not* Crockford (`0-9 ABCDEFGHJKMNPQRSTVWXYZ`). Crockford skips `i`/`l`/`o`/`u`.
+- **Wrong hash**: SHA3-256 ≠ SHA-256 ≠ Keccak-256. Use FIPS 202 SHA3-256.
+
+When you've passed the test, open a PR against [`zap-proto/rns`](https://github.com/zap-proto/rns) listing your repo in the SDK matrix on [/docs/post-quantum](/docs/post-quantum#per-language-status).
+
+## Related
+
+- [/docs/post-quantum](/docs/post-quantum) — KEM, identity, PQ-RNS layers
+- [/docs/protocols/rns](/docs/protocols/rns) — protocol detail and trust model
+- [zap-proto/rns](https://github.com/zap-proto/rns) — Go reference + KAT vector

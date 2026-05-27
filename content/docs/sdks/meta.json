@@ -1,0 +1,20 @@
+{
+  "title": "SDKs",
+  "pages": [
+    "index",
+    "---Core---",
+    "typescript",
+    "go",
+    "python",
+    "rust",
+    "cpp",
+    "c",
+    "---JVM / .NET---",
+    "java",
+    "csharp",
+    "---Functional---",
+    "ocaml",
+    "haskell",
+    "erlang"
+  ]
+}

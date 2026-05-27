@@ -1,90 +1,147 @@
 ---
 title: RNS over ZAP
-description: Resource Name Service — service discovery bound to keypair identity, not DNS.
+description: PQ-RNS — Resource Name Service binding names to post-quantum identity keys.
 ---
 
 # RNS over ZAP
 
-`zap-proto/rns` is the **Resource Name Service** — a DNS replacement for ZAP services. Instead of looking up an A/AAAA record, you resolve a name to a *KEM keypair* and its current ZAP endpoints. The peer's identity is the address; you can prove who you connected to without trusting a CA, a DNS provider, or a control plane.
+**RNS** (Resource Name Service) resolves service names to **post-quantum identity records**. Instead of looking up an A/AAAA record and trusting whatever's at that IP, you resolve a name to a `(kemPubKey, sigPubKey)` pair signed by the issuing registry. The peer must prove possession of the matching private keys on connect — the *identity* is the address.
 
-## Why not DNS?
+This is the part of ZAP that matters most under a quantum-capable adversary: even with perfect classical PQ transport, a name service that resolves to "whoever holds an X509 cert from a CA you trust" still concentrates trust in the CA. RNS removes the CA.
 
-DNS resolves names to IPs. The peer's identity is whatever happens to be sitting on that IP, validated (maybe) by a certificate signed by a CA you implicitly trust. RNS instead:
+> **Status — spec-only, January 2026.** The wire schema is published and the [zap-proto/papers](https://github.com/zap-proto/papers) `rns-identity-binding` proof is the reference. The Go resolver is in active development; client/server implementations in TS / Python / Rust will follow. Until then, you can implement against the schema directly using any [SDK](/docs/sdks) — the canonical record encoding is language-neutral. Cross-language KATs ship as test fixtures, see below.
 
-- Resolves to a **keypair** — the peer must prove possession of the private key on connect.
-- Resolves to **all current endpoints** — IPv4, IPv6, ZAP-over-Tor, ZAP-over-WireGuard — at once.
-- Updates are **signed by the owning key**, not by the registrar. No "registrar hijack" attack surface.
-- Names can be **opaque** (`did:zap:z6Mk...`) for permissionless deployment, or **human-readable** (`acme.payments`) when registered against a community-run namespace.
+## Wire schema
 
-## Install
+The schema is in [zap-proto/rns/schema/zap_rns.zap](https://github.com/zap-proto/rns/blob/main/schema/zap_rns.zap). Verbatim:
 
-```bash
-go get github.com/zap-proto/rns
+```
+struct Record
+  name      Text       # human-readable name, e.g. "acme.payments"
+  kemPubKey Data       # X-Wing static public key (1216 bytes)
+  sigPubKey Data       # hybrid sig public key (Ed25519 + ML-DSA-65, 1984 bytes)
+  ttl       UInt32     # seconds — cache lifetime hint
+  notBefore UInt64     # unix nanos
+  notAfter  UInt64
+  registry  Text       # which RNS authority issued this record
+  signature Data       # registry signs everything except `signature` itself
+
+struct Query
+  name Text
+  auth Data            # optional — token signed by requester's long-term key
+
+struct Response
+  union
+    record   Record    # found
+    notFound Text      # name not registered
+    expired  Record    # registered but past notAfter — included for cache invalidation
+    denied   Text      # registry refused the query
 ```
 
-## Resolve a name
+## Trust model
 
-```go
-package main
+The resolver doesn't need to be trusted. A returned `Record` is verified end-to-end:
 
-import (
-    "context"
-    "fmt"
+1. Pull the record from any RNS resolver.
+2. Compute the canonical encoding of `(name, kemPubKey, sigPubKey, ttl, notBefore, notAfter, registry)`.
+3. Verify `signature` against the **registry's** public key — published out-of-band, pinned at deploy time. Multiple registries are supported; clients trust whichever set of registry pubkeys their config holds.
+4. Check `now ∈ [notBefore, notAfter]`. If past `notAfter`, treat as `expired`.
 
-    zrns "github.com/zap-proto/rns"
-)
+A forged or stale answer fails verification. A registry can't issue records for a name without also publishing the signature — there's no "trust me, the name maps here" — only "here's the registry's signed claim."
 
-func main() {
-    ctx := context.Background()
+Compare to DNS+CA:
 
-    record, err := zrns.Resolve(ctx, "acme.payments")
-    if err != nil { log.Fatal(err) }
+| | DNS+CA | RNS |
+|---|---|---|
+| Who you trust | DNS provider, registrar, CA, every CA in the trust store | Registry pubkey (you choose; you pin) |
+| Who can spoof | CA mis-issuance, DNS poisoning, registrar hijack | Forging the registry's signature |
+| What you get | An IP address | A keypair + endpoints |
+| Authentication on connect | New TLS handshake, certs validate hostname | Same X-Wing pk that was in the record |
 
-    fmt.Println("Identity:", record.Identity)        // did:zap:z6Mk...
-    fmt.Println("Endpoints:", record.Endpoints)      // [zap://1.2.3.4:9000, zap://[2001::1]:9000]
-    fmt.Println("Signed at:", record.SignedAt)
-    fmt.Println("Signed by:", record.Signature.Verify(record.Identity))
-}
+## PQ-RNS — putting it together
+
+The two keys in a record:
+
+- **`kemPubKey`** is an X-Wing static public key. Future ZAP connections to this identity use this key as `pk_X` in the X-Wing combiner. The handshake binds the channel to the resolved identity.
+- **`sigPubKey`** is a hybrid Ed25519 + ML-DSA-65 verification key. Used to sign capability tokens, attestations, and any application-level claims attributed to this identity.
+
+End-to-end PQ flow:
+
+```
+client                                    RNS resolver         server
+  │                                            │                  │
+  │── Query("acme.payments") ─────────────────→│                  │
+  │                                            │                  │
+  │←── Response(Record signed by registry) ────│                  │
+  │                                                               │
+  │  verify registry signature over Record                        │
+  │  pick endpoint from Record.endpoints                          │
+  │                                                               │
+  │── X-Wing handshake (recipient pk = Record.kemPubKey) ────────→│
+  │                                                               │
+  │←── X-Wing ct + sealed identity + ML-DSA-65 transcript sig ───│
+  │                                                               │
+  │  verify ML-DSA-65 sig against Record.sigPubKey                │
+  │  channel is bound to the resolved name                        │
+  │                                                               │
+  │←── encrypted ZAP RPC over X-Wing-derived ChaCha20-Poly1305 ──→│
 ```
 
-The returned record is signed by the owning identity — a forged or stale answer fails verification.
+No CA. No DNS hijack vector. The classical primitive (Ed25519, X25519) and the lattice primitive (ML-DSA-65, ML-KEM-768) are *both* needed to forge a session — breaking either alone doesn't help.
 
-## Publish a record
+## Watching for updates
 
-```go
-identity := zrns.LoadIdentity("./acme.key")  // ML-KEM-768 + Ed25519
+Records are immutable per signature, but a registry can publish a *new* signed record with a later `notBefore` to rotate endpoints. RNS clients SHOULD subscribe rather than poll:
 
-publisher := zrns.NewPublisher(identity)
-err := publisher.Publish(ctx, "acme.payments", zrns.Record{
-    Endpoints: []string{"zap://1.2.3.4:9000", "zap://[2001::1]:9000"},
-    TTL:       300,
-})
+```
+# pseudo-API across all SDKs
+ch = rns.watch("acme.payments", registries=[...])
+for record in ch:
+    update_load_balancer(record.endpoints)
 ```
 
-Records are content-addressed in the RNS registry by `hash(identity || name)`, so multiple publishers don't collide and you can't squat someone else's identity.
+When a publisher rotates endpoints (failover, scale-out), every watcher sees it within one round trip.
 
-## Watch for updates
+## DIDs (`did:zap`)
 
-```go
-ch, _ := zrns.Watch(ctx, "acme.payments")
-for record := range ch {
-    fmt.Println("endpoints updated:", record.Endpoints)
-}
+A `did:zap:<hash>` is the **base32 SHA3-256 of the canonical `(kemPubKey || sigPubKey)` encoding**. Resolving a DID is the same path as resolving a name, except the registry index is content-addressed instead of name-keyed.
+
+```
+did = "did:zap:" + base32(SHA3-256(kemPubKey || sigPubKey))
 ```
 
-Use this to drive load-balancer config without polling — when the publisher rotates endpoints (failover, scale-out), every watcher sees it within one round trip.
+Two implementations that produce the same DID for the same keypair are guaranteed bit-for-bit interop.
 
-## DID resolution
+## Cross-language KATs
 
-RNS doubles as a DID resolver for `did:zap`:
+The canonical encoding is locked by a **known-answer test (KAT)** shipped in every SDK. A test that doesn't reproduce the same DID from the same `(kemPubKey, sigPubKey)` fails immediately:
 
-```go
-doc, _ := zrns.ResolveDID(ctx, "did:zap:z6Mk...")
-fmt.Println("Controller:", doc.Controller)
-fmt.Println("Service endpoints:", doc.Service)
 ```
+kemPubKey  = bytes.fromhex("01" * 1216)
+sigPubKey  = bytes.fromhex("02" * 1984)
+expectedDID = "did:zap:" + base32(SHA3-256(kemPubKey || sigPubKey))
+```
+
+The Go reference computes the same DID; so does the Rust, Python, and TypeScript port (forthcoming). Any divergence on the encoding, the hash, or the byte order is a test failure — that's the floor of cross-language correctness.
+
+KAT vectors and test runners are published at [zap-proto/rns/testdata](https://github.com/zap-proto/rns) (forthcoming directory) so a third-party SDK can drop them in unchanged.
+
+## Per-language status
+
+| Language | Schema codegen | Resolver client | Registry server | KAT |
+|---|---|---|---|---|
+| Go | ✅ | reference impl in progress | reference impl in progress | ✅ |
+| TypeScript | ✅ | spec-only | — | ⏳ |
+| Python | ✅ | spec-only | — | ⏳ |
+| Rust | ✅ | spec-only | — | ⏳ |
+| C++ | ✅ | — | — | ⏳ |
+| Java | ✅ | — | — | ⏳ |
+
+Spec-only means: the schema is published and codegen produces the record types in the language, but the resolver / registry runtime is not yet implemented. The KAT is what fixes the canonical encoding so client implementations can be developed independently and still interop.
 
 ## Related
 
-- [zap-proto/rns](https://github.com/zap-proto/rns) — Go implementation
-- [transports](/docs/transports) — how RNS records map to underlying endpoints
+- [Post-quantum overview](/docs/post-quantum) — KEM, identity, name-service layers
+- [Native ZAP RPC](/docs/protocols/native) — how the channel reuses `Record.kemPubKey`
+- [zap-proto/rns](https://github.com/zap-proto/rns) — schema + test vectors
+- [zap-proto/papers](https://github.com/zap-proto/papers) — `rns-identity-binding` proof

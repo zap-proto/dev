@@ -221,16 +221,14 @@ For unauthenticated services (public read-only endpoints), use `zap.WithAnonymou
 
 ## Performance
 
-Native ZAP RPC vs. gRPC over HTTP/2 on the same hardware, same calculator service:
+The current [zap-proto/bench](https://github.com/zap-proto/bench) harness measures ZAP-HTTP and a length-prefixed native ZAP echo against `net/http`+JSON. Honest numbers from `bench-results.txt` (concurrency=32, small workload):
 
-| Metric | gRPC / HTTP-2 | ZAP native | ratio |
-|---|---|---|---|
-| Call p50 | 38 µs | **2.1 µs** | 18× |
-| Call p99 | 240 µs | **6.4 µs** | 38× |
-| RSS / 10k conn | 580 MiB | **86 MiB** | 6.7× |
-| Calls/s (1 core) | 95k | **870k** | 9.2× |
+- HTTP/1.1+JSON: 34,411 req/s
+- ZAP-binary HTTP: 30,868 req/s (0.90×)
 
-See [benchmarks](/docs/benchmarks) for the harness. The gap is mostly serializer cost — gRPC does protobuf encode/decode on every call, ZAP doesn't.
+A native-ZAP echo (no HTTP shape, no headers, length-prefixed frames) is in `native_zap_test.go` — comparison numbers will be folded into `bench-results.txt` in the next harness pass. Until then there is no published native-vs-gRPC table here, because we don't have a reproducible gRPC comparator in-tree.
+
+What native ZAP RPC actually buys you over gRPC isn't µs of latency — that depends on a careful harness — it's the semantic shift: **capabilities instead of bearer tokens**, **identity-bound transport** instead of TLS-over-PKI, **one wire format** that the rest of the protocol stack rides on. The latency improvement, when measured, will land in the benchmarks page sourced from the bench harness output.
 
 ## Related
 

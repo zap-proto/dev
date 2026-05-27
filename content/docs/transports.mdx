@@ -238,40 +238,19 @@ server := zap.NewServer(
 client, err := zap.Dial("wss://example.com/rpc")
 ```
 
-## ZAP in the browser (WASM)
+## In the browser and at the edge
 
-For browser clients you don't need a separate runtime — pull in [`@zap-proto/wasm`](https://www.npmjs.com/package/@zap-proto/wasm), the encoder + transport compiled to WebAssembly. It speaks `wss://` to the server unchanged; from the application's point of view it's the same `Zap` class you'd use in Node.
+Browser → server is **TLS 1.3**. Chrome / Safari handle the KEM (recent versions ship `X25519MLKEM768`), the application runs over `wss://`. The ZAP wire format is fine over TLS, but the X-Wing handshake described in [post-quantum](/docs/post-quantum) terminates at the server, not in the browser. End-to-end PQ ZAP between a browser and an origin requires a server-side terminator; the browser hop is TLS.
 
-```ts
-import { Zap } from '@zap-proto/wasm'
+The pattern that works today:
 
-const client = await Zap.connect('wss://api.example.com/rpc')
-const tools  = await client.listTools()
+```
+Browser ──(wss:// + TLS 1.3 hybrid KEM)──→ Edge Worker ──(ZAP over X-Wing)──→ Origin
 ```
 
-Bundle size is ~210 KiB gzipped (full encoder + X-Wing KEM); ~64 KiB if you tree-shake to schema-only.
+The Edge Worker (Cloudflare Workers / Deno / Bun — any V8 isolate runtime) acts as the ZAP terminator. The browser sees `fetch`; the Worker holds the persistent X-Wing-authenticated ZAP connection upstream.
 
-## ZAP at the edge (Workers / Deno / Bun)
-
-The WASM build runs on Cloudflare Workers, Deno, Bun, and any V8-isolate runtime. Use it to terminate ZAP at the edge:
-
-```ts
-// Cloudflare Worker
-import { Zap } from '@zap-proto/wasm'
-
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const upstream = await Zap.connect(env.ZAP_UPSTREAM)
-    const result   = await upstream.callTool({
-      name: 'lookup',
-      args: JSON.stringify(await request.json()),
-    })
-    return Response.json(JSON.parse(result.content))
-  }
-}
-```
-
-This is the **cloudflare-esque update path**: deploy a tiny worker that brokers ZAP between browser/REST clients and your origin ZAP services. The worker holds the persistent KEM-authenticated ZAP connection (across cold starts via durable objects / KV); browsers see plain `fetch`. Latency penalty is one extra hop, but the worker can fan out to many origins, cache reads, and serve geographically-near clients without changing the origin.
+A first-class browser/WASM SDK is on the roadmap — see the [SDK status table on /docs/post-quantum](/docs/post-quantum#per-language-status). Today, talk to your origin via a thin Worker-side adapter using [zap-proto/ts](https://github.com/zap-proto/ts) or [zap-proto/zap-es](https://github.com/zap-proto/zap-es); the X-Wing/KEM hop happens server-side.
 
 ## Multi-Transport Server
 

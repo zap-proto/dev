@@ -1,0 +1,13 @@
+{
+  "title": "Protocols over ZAP",
+  "pages": [
+    "index",
+    "http",
+    "mcp",
+    "a2a",
+    "acp",
+    "rns",
+    "fix",
+    "ws"
+  ]
+}

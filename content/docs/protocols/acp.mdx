@@ -1,0 +1,92 @@
+---
+title: ACP over ZAP
+description: Agent Communication Protocol — FIPA-style speech acts, signed and non-repudiable.
+---
+
+# ACP over ZAP
+
+`zap-proto/acp` is a modern take on **FIPA ACL** (Agent Communication Language) — performative-typed messages between agents — riding on ZAP. Where A2A is task-oriented (issue work, get artifacts back), ACP is dialog-oriented (assert, query, agree, propose, refuse).
+
+Each message has a **performative** (`inform`, `request`, `query`, `propose`, `accept-proposal`, `refuse`, ...) and is signed by the sender. The receiver gets a non-repudiable record of what was said.
+
+## Install
+
+```bash
+go get github.com/zap-proto/acp
+```
+
+## Send an inform message
+
+```go
+package main
+
+import (
+    "context"
+
+    zacp "github.com/zap-proto/acp"
+)
+
+func main() {
+    ctx := context.Background()
+
+    client, _ := zacp.Connect(ctx, "zap://peer.example:9300")
+    defer client.Close()
+
+    err := client.Send(ctx, zacp.Message{
+        Performative: zacp.Inform,
+        Content:      zacp.JSON(map[string]any{
+            "fact":  "queue-depth",
+            "value": 1287,
+        }),
+        Ontology:     "ops/v1",
+    })
+    if err != nil { log.Fatal(err) }
+}
+```
+
+## Receive and dispatch
+
+```go
+srv := zacp.NewServer()
+
+srv.OnPerformative(zacp.Inform, func(ctx context.Context, m zacp.Message) error {
+    log.Printf("peer %s informed: %s", m.Sender, m.Content)
+    return nil
+})
+
+srv.OnPerformative(zacp.Request, func(ctx context.Context, m zacp.Message) error {
+    // ... do the work, then reply
+    return m.Reply(ctx, zacp.Inform, zacp.JSON(result))
+})
+
+log.Fatal(srv.ListenAndServe("zap://0.0.0.0:9300"))
+```
+
+## Propose / accept / refuse
+
+```go
+// Propose
+proposal, _ := client.Propose(ctx, zacp.JSON(map[string]any{
+    "action": "rebalance-shard",
+    "target": "shard-7",
+    "by":     time.Now().Add(5 * time.Minute),
+}))
+
+// Wait for accept/refuse
+switch reply := <-proposal.Replies(); reply.Performative {
+case zacp.AcceptProposal:
+    log.Println("peer accepted")
+case zacp.Refuse:
+    log.Println("peer refused:", reply.Content)
+}
+```
+
+## Why FIPA performatives, not just RPC
+
+RPC says "call this method." ACP says "this is the kind of speech act I'm performing" — which lets receivers reason about intent and disposition: a `refuse` is a different signal than a 500 error. For multi-agent coordination (negotiation, consensus, voting), the type system maps better than method dispatch.
+
+## Related
+
+- [zap-proto/acp](https://github.com/zap-proto/acp) — Go implementation
+- [A2A over ZAP](/docs/protocols/a2a) — task-oriented alternative
+- [MCP over ZAP](/docs/protocols/mcp) — for agent ↔ tool calls

@@ -1,329 +1,216 @@
 ---
 title: Python
-description: ZAP Python SDK - Async/await API
+description: ZAP Python SDK — pure-stdlib zero-copy wire codec, capability layer, RPC, and a decorator app.
 ---
 
 # Python Binding
 
-The Python binding provides an async/await API with full type hints. Its core —
-the zero-copy wire codec, the router envelope, and the RPC client/server — is
-**pure standard library**: nothing third-party is on the import path of
-`import zap`. Post-quantum crypto and the decorator app layer are optional extras.
+[`zap-proto`](https://pypi.org/project/zap-proto/) is the Python implementation
+of ZAP. The dist name on PyPI is `zap-proto`; the import is `zap`. Its core — the
+zero-copy wire codec (`zap.wire`), the capability runtime (`zap.cap`), the router
+envelope (`zap.frame` + `ZapClient`), the RPC client/server (`zap.rpc`), W3C DID
+identity, and agent consensus — is **pure standard library**: nothing
+third-party is on the import path of `import zap`.
+
+The wire codec is byte-for-byte compatible with the canonical Go runtime
+([`zap-proto/go`](https://github.com/zap-proto/go)) — the same 16-byte `ZAP\x00`
+header and fixed-offset layout, so a buffer this library writes is read by Go and
+vice versa. Post-quantum crypto and the decorator app layer are optional extras.
 
 ## Installation
 
 ```bash
 pip install zap-proto
-
-# Or with uv
+# or
 uv add zap-proto
 ```
 
-## Quick Start
+Optional extras:
 
-```python
-import asyncio
-import json
-import uuid
-from zap_protocol import Zap, ClientInfo, ToolCall
-
-async def main():
-    # Connect to ZAP server
-    client = await Zap.connect("zap://localhost:9000")
-
-    # Initialize
-    server = await client.init(ClientInfo(
-        name="my-agent",
-        version="1.0.0"
-    ))
-    print(f"Connected to: {server.name} v{server.version}")
-
-    # List tools
-    tools = await client.list_tools()
-    for tool in tools:
-        print(f"  {tool.name} - {tool.description}")
-
-    # Call a tool
-    result = await client.call_tool(ToolCall(
-        id=str(uuid.uuid4()),
-        name="read_file",
-        args=json.dumps({"path": "/etc/hosts"}).encode()
-    ))
-
-    if result.error:
-        print(f"Error: {result.error}")
-    else:
-        print(f"Result: {result.content.decode()}")
-
-    await client.close()
-
-asyncio.run(main())
+```bash
+pip install "zap-proto[crypto]"  # real ML-KEM-768 / ML-DSA-65 / X25519
+pip install "zap-proto[app]"     # the FastMCP-style decorator app (pydantic)
 ```
 
-## Client API
+## Round-trip
 
-### Connection
+Build a message, then read it back zero-copy. `start_object` lays out a struct's
+fixed section; `parse` validates the header and `root()` returns an `Object` that
+reads fields straight out of the buffer — no decode step.
 
 ```python
-# Simple connection
-client = await Zap.connect("zap://localhost:9000")
+from zap import Builder, parse
 
-# With options
-client = await Zap.connect(
-    "zap://localhost:9000",
-    timeout=30.0,
-    identity=identity,
+# Write: field @0 uint32, @8 text, @16 bytes.
+b = Builder()
+obj = b.start_object(24)             # 24-byte fixed section
+obj.set_uint32(0, 0xDEADBEEF)
+obj.set_text(8, "zap")
+obj.set_bytes(16, b"\x01\x02\x03\x04")
+obj.finish_as_root()
+buf = b.finish()                     # bytes — the ZAP wire message
+
+# Read: zero-copy. The Message aliases buf; nothing is deserialized.
+root = parse(buf).root()
+assert root.uint32(0) == 0xDEADBEEF
+assert root.text(8) == "zap"
+assert root.bytes(16) == b"\x01\x02\x03\x04"
+```
+
+Field offsets are explicit here to show the runtime; in real code you generate a
+typed View + Builder per struct from a `.zap` schema (see
+[Code Generation](/docs/codegen)). Lists (flat fixed-stride and variable-element)
+and nested objects are supported; the reader rejects out-of-bounds and backward
+pointers that would alias the wire header, and clamps list lengths — so an
+adversarial buffer that Go rejects is rejected here too.
+
+## RPC
+
+`zap.rpc` is a real request/response transport over TCP. The `Server` dispatches
+the `Zap` interface method ordinals declared in the `zap.zap` schema (`init @0` …
+`log @8`, exposed as the `Method` enum); the `Client` calls them.
+
+```python
+import threading
+from zap.rpc import Server, Client, Method
+
+# Server: register a handler per Method ordinal, then serve.
+srv = Server(host="127.0.0.1", port=0)
+srv.handle(Method.CALL_TOOL, lambda params: {"content": f"hello {params['name']}"})
+port = srv.bind()
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+# Client: connect and call by ordinal.
+c = Client.connect("127.0.0.1", port)
+result = c.call(Method.CALL_TOOL, {"name": "world"})
+assert result["content"] == "hello world"
+c.close()
+srv.close()
+```
+
+The wire body is JSON inside a magic-framed envelope (the `zap.protocol` framing,
+`ZAP\x01` + type + length + JSON), so the RPC layer is debuggable without a
+codec.
+
+## Capabilities
+
+`zap.cap` is the capability runtime — a faithful port of
+[`zap-proto/go/cap`](https://github.com/zap-proto/go/tree/main/cap) over the same
+`capabilities.zap` schema. A `Cap` is a signed, attenuable token of authority
+over a `target`, granted to a `holder` by an `issuer`. The wire, canonical-bytes,
+and `CapID` paths are pure stdlib; *signing* needs the `[crypto]` extra.
+
+```python
+from zap import cap
+
+# Mint a root cap. Ed25519Signer is the built-in mandatory scheme.
+signer = cap.Ed25519Signer.generate()
+
+target = bytes(range(32))            # 32-byte content hash of the resource
+holder = bytes(range(31, -1, -1))    # 32-byte content hash of the holder
+c = cap.issue(
+    cap.Issuance(
+        kind=int(cap.CapKind.IAM_SESSION),
+        target=target,
+        holder=holder,
+        permissions=cap.PERM_ATTENUATE,  # bits the holder may exercise / delegate
+        expires_at=2_000_000_000,        # unix seconds; 0 = never
+    ),
+    signer,
 )
 
-# Context manager
-async with Zap.connect("zap://localhost:9000") as client:
-    tools = await client.list_tools()
-```
-
-### Tools
-
-```python
-# List tools
-tools = await client.list_tools()
-
-# Call tool
-result = await client.call_tool(ToolCall(
-    id="call-1",
-    name="my_tool",
-    args=b'{"param": "value"}'
-))
-
-# With typed result
-content = json.loads(result.content)
-```
-
-### Resources
-
-```python
-# List resources
-resources = await client.list_resources()
-
-# Read resource
-content = await client.read_resource("file:///etc/hosts")
-print(content.text)  # or content.blob for binary
-
-# Subscribe to updates
-stream = await client.subscribe("file:///var/log/app.log")
-async for update in stream:
-    print(f"Update: {update.content}")
-```
-
-### Prompts
-
-```python
-# List prompts
-prompts = await client.list_prompts()
-
-# Get prompt messages
-messages = await client.get_prompt(
-    "code_review",
-    {"topic": "python"}
+# Verify a single cap. The Verifier holds the policy: issuer-key resolution,
+# revocation lookup, and (optionally) a PQ signature hook.
+issuer = signer.public()
+v = cap.Verifier(
+    issuer_key=lambda h: signer.public_key_bytes() if h == issuer else None,
 )
-for msg in messages:
-    print(f"{msg.role}: {msg.content}")
+v.verify(c, now=1_700_000_000)       # raises ExpiredError / RevokedError / … on failure
 ```
 
-## Gateway
+Derive a narrower child with `attenuate` — the signer must hold the parent's
+holder key, permissions intersect with the parent's, expiry can only shrink, and
+the parent must carry `PERM_ATTENUATE` (or be a `CapKind.DELEGATE` cap):
 
 ```python
-from zap_protocol import Gateway, ServerConfig, Transport, Auth
-import os
-
-# Create gateway
-gateway = Gateway()
-
-# Add MCP server
-fs_id = await gateway.add_server(
-    "filesystem",
-    "stdio://npx -y @modelcontextprotocol/server-filesystem /tmp",
-    ServerConfig(transport=Transport.STDIO)
-)
-
-# Add with authentication
-gh_id = await gateway.add_server(
-    "github",
-    "stdio://npx -y @modelcontextprotocol/server-github",
-    ServerConfig(
-        transport=Transport.STDIO,
-        auth=Auth(bearer=os.environ["GITHUB_TOKEN"]),
-        timeout=60000
-    )
-)
-
-# List all tools
-tools = await gateway.list_tools()
-
-# Check status
-status = await gateway.server_status(fs_id)
-print(f"Status: {status}")
+child = cap.attenuate(c, child_holder, cap.PERM_AUDIT, None, 0, signer)
 ```
 
-## Type Hints
+`cap.id` is `SHA-256(canonical_bytes ‖ Sig)` and `canonical_bytes` is the SPEC §3
+signed scope — both byte-identical to the Go runtime, pinned by a cross-language
+known-answer test. `verify_chain(leaf, chain, op, target, holder, now)` validates
+a full chain; `revoke` / `verify_revocation` handle revocation. Schemes are
+Ed25519 (mandatory bootstrap), ML-DSA-65 (FIPS 204), and secp256k1 ECDSA — a
+missing crypto backend raises `SchemeUnavailable` (fail-closed, never a silent
+downgrade).
 
-Full type annotations are available:
+## Decorator app
+
+The `[app]` extra adds `ZAP`, a FastMCP-style decorator app that builds JSON
+Schemas from your function signatures and serves them over the real `zap.rpc`
+transport.
 
 ```python
-from zap_protocol import (
-    Zap,
-    Tool,
-    ToolCall,
-    ToolResult,
-    Resource,
-    ResourceContent,
-    ServerInfo,
-    ClientInfo,
-)
+from zap import ZAP, PromptMessage
 
-async def process_tools(client: Zap) -> list[str]:
-    tools: list[Tool] = await client.list_tools()
-    return [t.name for t in tools]
+app = ZAP("my-agent", version="1.0.0")
+
+@app.tool
+def search(query: str, limit: int = 10) -> list[dict]:
+    """Search for content in the knowledge base"""
+    return [{"title": f"Result for {query}", "score": 0.95}]
+
+@app.resource("file://{path}")
+def read_file(path: str) -> str:
+    """Read a file from disk"""
+    return open(path).read()
+
+@app.prompt
+def greeting(name: str) -> list[PromptMessage]:
+    """Generate a personalized greeting"""
+    return [PromptMessage(role="assistant", content=f"Hello, {name}!")]
+
+if __name__ == "__main__":
+    app.run(port=9999)               # serves real ZAP RPC
 ```
 
-## Error Handling
+The matching high-level client (`Client`, also from the `[app]` extra) speaks the
+same service:
 
 ```python
-from zap_protocol import ZapError, DisconnectedError, TimeoutError
+from zap import Client
 
-try:
-    result = await client.call_tool(call)
-except DisconnectedError:
-    print("Connection lost, reconnecting...")
-    await client.reconnect()
-except TimeoutError:
-    print("Request timed out")
-except ZapError as e:
-    print(f"ZAP error: {e}")
-
-if result.error:
-    print(f"Tool error: {result.error}")
+with Client("localhost:9999") as client:
+    client.connect()
+    tools = client.list_tools()
+    result = client.call_tool("search", {"query": "hello world"})
+    print(result.content)            # bytes
+    content = client.read_resource("file:///tmp/test.txt")
+    print(content.text)
 ```
 
-## Server Implementation
+## Type hints
+
+The package is fully typed and checked under `mypy --strict`. The wire, cap, and
+RPC surfaces import with no third-party dependency:
 
 ```python
-from zap_protocol.server import Server, ZapHandler
-from zap_protocol import (
-    ServerInfo,
-    ClientInfo,
-    Tool,
-    ToolCall,
-    ToolResult,
-    Capabilities,
-)
-import json
-
-class MyHandler(ZapHandler):
-    async def init(self, client: ClientInfo) -> ServerInfo:
-        return ServerInfo(
-            name="my-server",
-            version="1.0.0",
-            capabilities=Capabilities(
-                tools=True,
-                resources=True,
-                prompts=False,
-                logging=True
-            )
-        )
-
-    async def list_tools(self) -> list[Tool]:
-        return [
-            Tool(
-                name="hello",
-                description="Says hello",
-                schema=json.dumps({
-                    "type": "object",
-                    "properties": {"name": {"type": "string"}}
-                }).encode()
-            )
-        ]
-
-    async def call_tool(self, call: ToolCall) -> ToolResult:
-        if call.name == "hello":
-            args = json.loads(call.args)
-            name = args.get("name", "World")
-            return ToolResult(
-                id=call.id,
-                content=f"Hello, {name}!".encode()
-            )
-        return ToolResult(
-            id=call.id,
-            error="Unknown tool"
-        )
-
-async def main():
-    server = Server(MyHandler())
-    await server.serve("0.0.0.0", 9000)
-
-asyncio.run(main())
+from zap import Builder, Message, Object, parse
+from zap import cap
+from zap.rpc import Server, Client, Method
+from zap.identity import DID, DIDMethod
 ```
 
-## Async Patterns
+## Develop
 
-### Concurrent Calls
-
-```python
-import asyncio
-
-async def call_tools_concurrently(client: Zap, calls: list[ToolCall]):
-    results = await asyncio.gather(*[
-        client.call_tool(call) for call in calls
-    ])
-    return results
-```
-
-### Background Tasks
-
-```python
-async def monitor_resource(client: Zap, uri: str):
-    stream = await client.subscribe(uri)
-    async for update in stream:
-        print(f"Update: {update.content}")
-
-# Run in background
-task = asyncio.create_task(monitor_resource(client, "file:///log"))
-```
-
-### Cancellation
-
-```python
-async def with_timeout():
-    try:
-        async with asyncio.timeout(10.0):
-            result = await client.call_tool(call)
-    except asyncio.TimeoutError:
-        print("Call timed out")
-```
-
-## Testing
-
-```python
-import pytest
-from unittest.mock import AsyncMock
-from zap_protocol import Zap, Tool
-
-@pytest.fixture
-def mock_client():
-    client = AsyncMock(spec=Zap)
-    client.list_tools.return_value = [
-        Tool(name="test", description="Test tool", schema=b"{}")
-    ]
-    return client
-
-@pytest.mark.asyncio
-async def test_list_tools(mock_client):
-    tools = await mock_client.list_tools()
-    assert len(tools) == 1
-    assert tools[0].name == "test"
+```bash
+uv sync
+ruff check
+mypy --strict src/zap/
+pytest
 ```
 
 ## Examples
 
-Full examples at:
-- [examples/client.py](https://github.com/zap-proto/py/blob/main/examples/client.py)
-- [examples/server.py](https://github.com/zap-proto/py/blob/main/examples/server.py)
-- [examples/gateway.py](https://github.com/zap-proto/py/blob/main/examples/gateway.py)
+- [tests/test_wire.py](https://github.com/zap-proto/py/blob/main/tests/test_wire.py) — round-trips against a Go-produced golden vector
+- [tests/testdata/cap_go_kat.json](https://github.com/zap-proto/py/blob/main/tests/testdata) — a Go-signed cap that decodes, recomputes the same CapID, and verifies in Python

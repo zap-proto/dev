@@ -5,87 +5,137 @@ description: Get started with ZAP Protocol in 5 minutes
 
 # Quick Start
 
-This guide will help you build your first ZAP service in under 5 minutes.
+This guide builds your first ZAP service end-to-end: write a schema, generate
+typed code, implement a server, and call it from a client.
 
 ## Prerequisites
 
 - Go 1.21+ or Rust 1.75+ or Node.js 20+
-- ZAP CLI (`zap`)
+- The ZAP schema compiler (installed below)
 
 ## Installation
 
 <Tabs items={["Go", "Rust", "TypeScript"]}>
 <Tab value="Go">
 ```bash
-# Install the ZAP CLI
-go install github.com/zap-proto/spec/cmd/zap@latest
+# Add the runtime
+go get github.com/zap-proto/go@v1.3.0
+
+# Install the schema compiler (the zapgen binary)
+go install github.com/zap-proto/go/cmd/zapgen@v1.3.0
 ```
 </Tab>
 <Tab value="Rust">
 ```bash
-# Add to Cargo.toml
-cargo add zap-proto
+# Install the schema compiler (provides the zapc binary)
+cargo install zap-schema
 
-# Install the code generator
-cargo install zap-codegen
+# Add the runtime crates to Cargo.toml
+#   zap     = { git = "https://github.com/zap-proto/rust" }
+#   zapc    = { git = "https://github.com/zap-proto/rust" }
+#   zap-rpc = { git = "https://github.com/zap-proto/rust" }
 ```
 </Tab>
 <Tab value="TypeScript">
 ```bash
-# Install packages
-npm install @zap-proto/zap @zap-proto/codegen
+# The runtime ships the zapgen CLI as a bin
+npm install @zap-proto/zap
 
 # Or with pnpm
-pnpm add @zap-proto/zap @zap-proto/codegen
+pnpm add @zap-proto/zap
 ```
 </Tab>
 </Tabs>
 
 ## Define Your Schema
 
-Create a file named `calculator.zap` (or `calculator.capnp` for legacy Cap'n Proto format):
+Create a file named `calculator.zap`. ZAP is whitespace-significant — no braces,
+no file ID, and ordinals are assigned automatically. The legacy Cap'n Proto brace
+form still parses; the two produce byte-identical schemas.
 
 <SchemaTabs
   filename="calculator.zap"
   zap={`# ZAP schema - no file ID needed, no ordinals
 
-interface Calculator
-  # Basic arithmetic operations
-  add (a Float64, b Float64) -> (result Float64)
-  subtract (a Float64, b Float64) -> (result Float64)
-  multiply (a Float64, b Float64) -> (result Float64)
-  divide (a Float64, b Float64) -> (result Float64)
+struct Operands
+  A Float64
+  B Float64
 
-  # Batch operations with streaming
-  sum (numbers List(Float64)) -> (total Float64)`}
+struct Value
+  Result Float64
+
+interface Calculator
+  # Methods get implicit ordinals 1, 2, 3, … in declaration order
+  add (req Operands) -> (resp Value)
+  subtract (req Operands) -> (resp Value)
+  multiply (req Operands) -> (resp Value)
+  divide (req Operands) -> (resp Value)`}
   capnp={`@0x85150b117366d14b;  # file ID required
 
-interface Calculator {
-  # Basic arithmetic operations
-  add @0 (a :Float64, b :Float64) -> (result :Float64);
-  subtract @1 (a :Float64, b :Float64) -> (result :Float64);
-  multiply @2 (a :Float64, b :Float64) -> (result :Float64);
-  divide @3 (a :Float64, b :Float64) -> (result :Float64);
+struct Operands {
+  A @0 :Float64;
+  B @1 :Float64;
+}
 
-  # Batch operations with streaming
-  sum @4 (numbers :List(Float64)) -> (total :Float64);
+struct Value {
+  Result @0 :Float64;
+}
+
+interface Calculator {
+  add @0 (req :Operands) -> (resp :Value);
+  subtract @1 (req :Operands) -> (resp :Value);
+  multiply @2 (req :Operands) -> (resp :Value);
+  divide @3 (req :Operands) -> (resp :Value);
 }`}
 />
 
 ## Generate Code
 
+<Tabs items={["Go", "Rust", "TypeScript"]}>
+<Tab value="Go">
 ```bash
-# Generate Go code
-zap generate calculator.zap --lang=go --out=./gen
+# Emit <struct>_zap.go files next to the schema
+zapgen calculator.zap
 
-# Generate Rust code
-zap generate calculator.zap --lang=rust --out=./gen
-
-# Generate TypeScript code
-zap generate calculator.zap --lang=ts --out=./gen
+# Or into a directory
+zapgen -out ./gen calculator.zap
 ```
+</Tab>
+<Tab value="Rust">
+```bash
+# One-shot generation with the zap-schema compiler
+zapc generate calculator.zap --lang rust --out ./gen/
+
+# Or wire it into a cargo build from build.rs:
+#   zapc::CompilerCommand::new().file("calculator.zap").run().unwrap();
+```
+</Tab>
+<Tab value="TypeScript">
+```bash
+# zapgen ships in @zap-proto/zap; writes calculator_zap.ts
+npx zapgen calculator.zap
+
+# Or into a directory
+npx zapgen -out ./src/gen calculator.zap
+```
+</Tab>
+</Tabs>
+
+Generation emits a zero-copy View + Builder per struct, plus — for the
+`interface` — a typed client and an abstract server over the ZAP call envelope.
+See [Code Generation](/docs/codegen) for the full backend matrix.
+
+> Go's self-contained `zapgen` reads the wire-type spelling for scalars
+> (`f64`, `u64`, `f32`, `u32`, …) and pins offsets explicitly, e.g.
+> `A f64 @0`. The canonical front-end the other backends drive uses the
+> capitalized names above (`Float64`, `UInt64`) with auto-assigned offsets;
+> both describe the same wire layout.
 
 ## Implement the Server
+
+The generated `Calculator` server is an abstract handler: implement each method,
+and the generated dispatcher decodes the call envelope and routes by method
+ordinal.
 
 <Tabs items={["Go", "Rust", "TypeScript"]}>
 <Tab value="Go">
@@ -93,261 +143,183 @@ zap generate calculator.zap --lang=ts --out=./gen
 package main
 
 import (
-    "context"
-    "errors"
-    "log"
+	"errors"
 
-    "github.com/zap-proto/go"
-    "yourmodule/gen"
+	"github.com/zap-proto/go/rpc"
+	"yourmodule/gen"
 )
 
-type calculatorServer struct{}
+type calculator struct{}
 
-func (s *calculatorServer) Add(ctx context.Context, a, b float64) (float64, error) {
-    return a + b, nil
+func (calculator) Add(req []byte) ([]byte, error) {
+	op, err := gen.WrapOperands(req)
+	if err != nil {
+		return nil, err
+	}
+	return gen.NewValue(gen.ValueInput{Result: op.A() + op.B()}), nil
 }
 
-func (s *calculatorServer) Subtract(ctx context.Context, a, b float64) (float64, error) {
-    return a - b, nil
+func (calculator) Divide(req []byte) ([]byte, error) {
+	op, err := gen.WrapOperands(req)
+	if err != nil {
+		return nil, err
+	}
+	if op.B() == 0 {
+		return nil, errors.New("division by zero")
+	}
+	return gen.NewValue(gen.ValueInput{Result: op.A() / op.B()}), nil
 }
 
-func (s *calculatorServer) Multiply(ctx context.Context, a, b float64) (float64, error) {
-    return a * b, nil
-}
+// Subtract and Multiply follow the same shape.
 
-func (s *calculatorServer) Divide(ctx context.Context, a, b float64) (float64, error) {
-    if b == 0 {
-        return 0, errors.New("division by zero")
-    }
-    return a / b, nil
-}
-
-func (s *calculatorServer) Sum(ctx context.Context, numbers []float64) (float64, error) {
-    var total float64
-    for _, n := range numbers {
-        total += n
-    }
-    return total, nil
-}
-
-func main() {
-    server := zap.NewServer(
-        zap.WithAddress(":9000"),
-        zap.WithLogger(log.Default()),
-    )
-
-    gen.RegisterCalculatorServer(server, &calculatorServer{})
-
-    log.Println("Server listening on :9000")
-    if err := server.ListenAndServe(); err != nil {
-        log.Fatal(err)
-    }
-}
+// In your transport's read loop, dispatch each inbound envelope:
+//   respBytes, err := gen.DispatchCalculator(calculator{}, envelope)
+// then write respBytes back. The rpc package defines the envelope (the bytes);
+// the transport that carries it is yours.
+var _ = rpc.StatusOK
 ```
 </Tab>
 <Tab value="Rust">
 ```rust
-use zap_protocol::{Server, Result};
-use gen::calculator::{Calculator, CalculatorServer};
+use zap_rpc::new_client;
+use crate::calculator_zap::calculator;
 
 struct CalculatorImpl;
 
-#[async_trait::async_trait]
-impl Calculator for CalculatorImpl {
-    async fn add(&self, a: f64, b: f64) -> Result<f64> {
-        Ok(a + b)
+impl calculator::Server for CalculatorImpl {
+    async fn add(
+        self: std::rc::Rc<Self>,
+        params: calculator::AddParams,
+        mut results: calculator::AddResults,
+    ) -> Result<(), ::zap::Error> {
+        let req = params.get()?.get_req()?;
+        results.get().init_resp().set_result(req.get_a() + req.get_b());
+        Ok(())
     }
 
-    async fn subtract(&self, a: f64, b: f64) -> Result<f64> {
-        Ok(a - b)
-    }
-
-    async fn multiply(&self, a: f64, b: f64) -> Result<f64> {
-        Ok(a * b)
-    }
-
-    async fn divide(&self, a: f64, b: f64) -> Result<f64> {
-        if b == 0.0 {
-            return Err(zap_protocol::Error::new("division by zero"));
+    async fn divide(
+        self: std::rc::Rc<Self>,
+        params: calculator::DivideParams,
+        mut results: calculator::DivideResults,
+    ) -> Result<(), ::zap::Error> {
+        let req = params.get()?.get_req()?;
+        if req.get_b() == 0.0 {
+            return Err(::zap::Error::failed("division by zero".into()));
         }
-        Ok(a / b)
+        results.get().init_resp().set_result(req.get_a() / req.get_b());
+        Ok(())
     }
 
-    async fn sum(&self, numbers: Vec<f64>) -> Result<f64> {
-        Ok(numbers.iter().sum())
-    }
+    // subtract and multiply follow the same shape.
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let server = Server::builder()
-        .register(CalculatorServer::new(CalculatorImpl))
-        .bind("[::]:9000")
-        .await?;
-
-    println!("Server listening on :9000");
-    server.serve().await
-}
+// Host it as the bootstrap capability:
+//   let client: calculator::Client = new_client(CalculatorImpl);
+// then serve `client` over a TwoParty VatNetwork (see the Rust SDK guide).
 ```
 </Tab>
 <Tab value="TypeScript">
 ```typescript
-import { createServer } from '@zap-proto/zap';
-import { Calculator } from './gen/calculator';
+import { CalculatorServer, Operands, newValue } from './gen/calculator_zap.js';
 
-const calculator: Calculator = {
-  async add(a: number, b: number): Promise<number> {
-    return a + b;
-  },
+// Methods take and return raw ZAP bytes; wrap/build at the edges.
+class Calculator extends CalculatorServer {
+  async add(req: Uint8Array): Promise<Uint8Array> {
+    const op = Operands.wrap(req);
+    return newValue({ result: op.a + op.b }); // getters are property accessors
+  }
 
-  async subtract(a: number, b: number): Promise<number> {
-    return a - b;
-  },
+  async divide(req: Uint8Array): Promise<Uint8Array> {
+    const op = Operands.wrap(req);
+    if (op.b === 0) throw new Error('division by zero');
+    return newValue({ result: op.a / op.b });
+  }
 
-  async multiply(a: number, b: number): Promise<number> {
-    return a * b;
-  },
+  // subtract and multiply follow the same shape.
+}
 
-  async divide(a: number, b: number): Promise<number> {
-    if (b === 0) {
-      throw new Error('division by zero');
-    }
-    return a / b;
-  },
-
-  async sum(numbers: number[]): Promise<number> {
-    return numbers.reduce((acc, n) => acc + n, 0);
-  },
-};
-
-const server = createServer({ port: 9000 });
-server.register('Calculator', calculator);
-
-console.log('Server listening on :9000');
-server.listen();
+// CalculatorServer.dispatch(envelope) decodes the ordinal and routes to the
+// matching handler; drive it from your transport's read loop.
 ```
 </Tab>
 </Tabs>
 
 ## Create a Client
 
+The generated client carries one typed method per declaration; each builds a
+request envelope, ships it over the channel you supply, and returns the decoded
+response.
+
 <Tabs items={["Go", "Rust", "TypeScript"]}>
 <Tab value="Go">
 ```go
 package main
 
 import (
-    "context"
-    "fmt"
-    "log"
+	"fmt"
 
-    "github.com/zap-proto/go"
-    "yourmodule/gen"
+	"yourmodule/gen"
 )
 
 func main() {
-    client, err := zap.Dial("localhost:9000")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer client.Close()
+	// channel is your EchoChannel/CalculatorChannel — the read/write loop that
+	// ships a request envelope and awaits its correlated rpc.Response.
+	calc := gen.NewCalculatorClient(channel, nil) // nil = no capability token
 
-    calc := gen.NewCalculatorClient(client)
-
-    ctx := context.Background()
-
-    result, err := calc.Add(ctx, 10, 5)
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Printf("10 + 5 = %.0f\n", result)
-
-    result, err = calc.Multiply(ctx, 6, 7)
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Printf("6 * 7 = %.0f\n", result)
-
-    total, err := calc.Sum(ctx, []float64{1, 2, 3, 4, 5})
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Printf("sum(1..5) = %.0f\n", total)
+	// A request method returns (rpc.Promise, body, error); the promise enables
+	// pipelining a dependent call before this one returns.
+	_, body, err := calc.Add(gen.NewOperands(gen.OperandsInput{A: 10, B: 5}))
+	if err != nil {
+		panic(err)
+	}
+	v, _ := gen.WrapValue(body)
+	fmt.Printf("10 + 5 = %.0f\n", v.Result()) // 15
 }
 ```
 </Tab>
 <Tab value="Rust">
 ```rust
-use gen::calculator::CalculatorClient;
-use zap_protocol::Client;
+use crate::calculator_zap::calculator;
+use zap_rpc::{rpc_twoparty_zap, RpcSystem};
 
-#[tokio::main]
-async fn main() -> zap_protocol::Result<()> {
-    let client = Client::connect("localhost:9000").await?;
-    let calc = CalculatorClient::new(client);
+// `calc` is the bootstrapped remote interface (see the Rust SDK guide for
+// constructing the RpcSystem over a connection).
+let calc: calculator::Client = rpc_system.bootstrap(rpc_twoparty_zap::Side::Server);
 
-    let result = calc.add(10.0, 5.0).await?;
-    println!("10 + 5 = {}", result);
-
-    let result = calc.multiply(6.0, 7.0).await?;
-    println!("6 * 7 = {}", result);
-
-    let total = calc.sum(vec![1.0, 2.0, 3.0, 4.0, 5.0]).await?;
-    println!("sum(1..5) = {}", total);
-
-    Ok(())
+let mut request = calc.add_request();
+{
+    let mut req = request.get().init_req();
+    req.set_a(10.0);
+    req.set_b(5.0);
 }
+let reply = request.send().promise.await?;
+println!("10 + 5 = {}", reply.get()?.get_resp()?.get_result()); // 15
 ```
 </Tab>
 <Tab value="TypeScript">
 ```typescript
-import { createClient } from '@zap-proto/zap';
-import { CalculatorClient } from './gen/calculator';
+import { ZapClient } from '@zap-proto/zap/node';
+import { CalculatorClient, newOperands, Value } from './gen/calculator_zap.js';
 
-async function main() {
-  const client = await createClient('localhost:9000');
-  const calc = new CalculatorClient(client);
+const conn = await ZapClient.connect('localhost:9000');
+const calc = new CalculatorClient(conn);
 
-  const sum = await calc.add(10, 5);
-  console.log(`10 + 5 = ${sum}`);
+// Methods take and return raw ZAP bytes; build the request, wrap the response.
+const body = await calc.add(newOperands({ a: 10, b: 5 }));
+console.log(`10 + 5 = ${Value.wrap(body).result}`); // 15
 
-  const product = await calc.multiply(6, 7);
-  console.log(`6 * 7 = ${product}`);
-
-  const total = await calc.sum([1, 2, 3, 4, 5]);
-  console.log(`sum(1..5) = ${total}`);
-
-  client.close();
-}
-
-main();
+conn.close();
 ```
 </Tab>
 </Tabs>
-
-## Run Your Service
-
-```bash
-# Terminal 1: Start the server
-go run server.go
-# Output: Server listening on :9000
-
-# Terminal 2: Run the client
-go run client.go
-# Output:
-# 10 + 5 = 15
-# 6 * 7 = 42
-# sum(1..5) = 15
-```
 
 ## Next Steps
 
 Now that you have a working ZAP service:
 
 - Pick a language-specific SDK guide: [TypeScript](/docs/sdks/typescript), [Go](/docs/sdks/go), [Python](/docs/sdks/python), [Rust](/docs/sdks/rust), [C++](/docs/sdks/cpp), [Java](/docs/sdks/java), [C#](/docs/sdks/csharp), [Erlang](/docs/sdks/erlang), [Haskell](/docs/sdks/haskell), [OCaml](/docs/sdks/ocaml), or [C](/docs/sdks/c)
+- Learn the [Schema Language](/docs/schema) and [Code Generation](/docs/codegen) in depth
+- Understand the [RPC System](/docs/rpc) — the call envelope, generated stubs, and promise pipelining
+- Read the [Architecture](/docs/architecture) and explore [Transports](/docs/transports)
 - Carry a higher-level protocol on ZAP: [HTTP](/docs/protocols/http), [MCP](/docs/protocols/mcp), [A2A](/docs/protocols/a2a), [ACP](/docs/protocols/acp), [RNS](/docs/protocols/rns), [FIX](/docs/protocols/fix), [WS](/docs/protocols/ws)
-- Learn about [Architecture](/docs/architecture) to understand the design
-- Explore [Transports](/docs/transports) for different network options
-- Set up a [Gateway](/docs/gateway) for HTTP clients
-- Add [Consensus](/docs/consensus) for distributed deployments
 - See [benchmarks](/docs/benchmarks) — 5-20× faster than equivalents on common hardware

@@ -1,0 +1,127 @@
+---
+title: Code Generation
+description: Turn a .zap schema into type-safe code with the zap front-end and per-language backends.
+---
+
+# Code Generation
+
+A `.zap` schema on its own is just a description. Code generation turns it into
+the View/Builder types and client/server stubs your program calls. ZAP keeps
+this honest with a single design rule: **one parser, many backends.**
+
+## How it works
+
+```
+schema.zap ──▶ zap (front-end) ──▶ code-generator request ──▶ backend ──▶ source
+                  ▲ parses .zap                                 ▲ emits one language
+```
+
+The canonical `zap` binary — built from
+[`zap-proto/cpp-core`](https://github.com/zap-proto/cpp-core) — is the only thing
+that parses schema text. It reads your `.zap` file (including the
+whitespace-significant syntax and its brace back-compat) and emits a binary
+*code-generator request*. A language backend consumes that request and emits
+source. Backends never parse `.zap` themselves, so every language sees identical
+schema semantics.
+
+Backends are resolved as `zap-<lang>` executables on `PATH`. The Rust, OCaml,
+Python, and Haskell runtimes all drive this same front-end.
+
+## Using the front-end
+
+```bash
+# Emit a code-generator request to stdout (what a backend reads on stdin).
+zap compile -o- schema.zap
+
+# Drive a language backend directly.
+zap compile -orust schema.zap     # invokes zap-rust
+zap compile -opython schema.zap   # invokes zap-python
+```
+
+The CLI also exposes a convenience `generate` verb that selects the backend and
+output directory for you:
+
+```bash
+zap generate schema.zap --lang=rust --out=./gen
+zap generate schema.zap --lang=go   --out=./gen
+```
+
+## TypeScript — `zapgen`
+
+The TypeScript runtime [`@zap-proto/zap`](https://github.com/zap-proto/js) ships
+its own self-contained generator, `zapgen`, as a package bin. Install the
+runtime and `npx zapgen` is available — no separate front-end needed for the
+TS-native flow:
+
+```bash
+npm install @zap-proto/zap
+
+npx zapgen schema.zap                   # writes schema_zap.ts next to the input
+npx zapgen -out ./src/gen schema.zap    # writes into the given directory
+npx zapgen --emit=openapi schema.zap    # writes schema.openapi.json (OpenAPI 3.1)
+npx zapgen --emit=ts,openapi schema.zap # writes both targets
+```
+
+For an `Echo` interface, `zapgen` emits `echo_zap.ts` containing:
+
+- one `StructView` subclass + builder per struct,
+- an `EchoMethod` ordinal table,
+- an `EchoClient` with one `async` method per declared method,
+- an abstract `EchoServer` whose `dispatch(envelope)` decodes the ordinal and
+  routes to the matching handler.
+
+The generated file imports from `@zap-proto/zap` and is byte-compatible with the
+Go runtime over the wire, so a TypeScript client can call a Go service unchanged.
+
+### OpenAPI output
+
+The `openapi` target emits one OpenAPI 3.1 document per `interface`. Each method
+becomes a `POST /<service-kebab>/<method-kebab>` operation whose request and
+response bodies are the JSON Schema of the method's structs; every referenced
+struct lands in `components.schemas`. These paths match what
+[`@zap-proto/web`](https://github.com/zap-proto/web)'s `httpServe` mounts, so the
+OpenAPI surface and the live HTTP service stay in lockstep. The directives
+`# @openapi:version X` and `# @openapi:server URL` set `info.version` and
+`servers[]`.
+
+## Rust — `zapc`
+
+The Rust backend, [`zapc`](https://github.com/zap-proto/rust), integrates with a
+`cargo` build. Call it from `build.rs`:
+
+```rust
+fn main() {
+    zapc::CompilerCommand::new()
+        .file("schema/echo.zap")
+        .run()
+        .expect("zap schema compile");
+}
+```
+
+`zapc::CompilerCommand` execs the canonical `zap` front-end and feeds its
+code-generator request to the Rust backend. To generate Rust without a `cargo`
+build, the [`zap-schema`](https://crates.io/crates/zap-schema) crate bundles the
+front-end and the Rust backend into a single `zap-schema` binary:
+
+```bash
+cargo install zap-schema
+```
+
+## Ordinal stability
+
+Generated code addresses fields and methods by ordinal, and ordinals follow
+declaration order. **Append-only edits are wire-safe**: adding a field or method
+gives it the next ordinal and regenerated peers stay compatible with deployed
+ones. To insert or reorder in source while preserving the wire, pin ordinals
+explicitly with `@N` (see [Schema Language](/docs/schema)).
+
+## Next Steps
+
+<Cards>
+  <Card title="Schema Language" href="/docs/schema">
+    The whitespace-significant syntax these tools consume
+  </Card>
+  <Card title="RPC System" href="/docs/rpc">
+    Wire generated clients and servers together
+  </Card>
+</Cards>

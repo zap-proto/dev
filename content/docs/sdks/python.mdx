@@ -5,7 +5,10 @@ description: ZAP Python SDK - Async/await API
 
 # Python Binding
 
-The Python binding provides an async/await API built on pycapnp with full type hints.
+The Python binding provides an async/await API with full type hints. Its core —
+the zero-copy wire codec, the router envelope, and the RPC client/server — is
+**pure standard library**: nothing third-party is on the import path of
+`import zap`. Post-quantum crypto and the decorator app layer are optional extras.
 
 ## Installation
 

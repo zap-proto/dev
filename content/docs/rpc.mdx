@@ -1,0 +1,158 @@
+---
+title: RPC System
+description: ZAP's capability RPC — the call envelope, generated clients and servers, and promise pipelining.
+---
+
+# RPC System
+
+An `interface` in a [schema](/docs/schema) is not just a struct — it is a set of
+callable methods. ZAP's RPC system turns those declarations into a typed client
+and an abstract server, carried over the wire by a small, fixed **call
+envelope**. It is a capability system: a call can target a specific object, and
+results can be used as arguments to further calls before they have even arrived
+(promise pipelining).
+
+## The call envelope
+
+Every request is a ZAP message tagged as a router frame. Its fixed fields are:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `method` | `UInt32` | The interface method ordinal — the schema's `@N`. |
+| `promiseID` | `UInt32` | Identifies a result to pipeline against, or `0`. |
+| `target` | `UInt32` | The capability this call is addressed to (`NO_TARGET = 0`). |
+| `cap` | `Data` | The capability token, when one is required. |
+| `payload` | `Data` | The request struct's bytes. |
+
+A response carries:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `status` | `UInt32` | `200` ok; `4xx`/`5xx` on error. |
+| `promiseID` | `UInt32` | Correlates the response to its request. |
+| `body` | `Data` | The response struct's bytes. |
+
+Because the method is addressed by ordinal — never by name — appending a method
+to an interface never renumbers the existing ones, so a new client and an old
+server interoperate as long as they share the methods they both know.
+
+## Status codes
+
+| Code | Name |
+| --- | --- |
+| `200` | OK |
+| `400` | BadRequest |
+| `401` | Unauthorized |
+| `403` | Forbidden |
+| `404` | NotFound |
+| `500` | Internal |
+
+## Generated client and server
+
+From an `interface`, code generation emits a typed client, an abstract server,
+and the method-ordinal table. For this schema:
+
+```zap
+struct EchoReq
+  msg Text
+
+struct EchoResp
+  msg Text
+
+interface Echo
+  echo (req EchoReq) -> (resp EchoResp)
+  notify (n EchoReq)
+```
+
+the TypeScript backend ([`zapgen`](/docs/codegen)) emits an `EchoClient` with one
+`async` method per declaration and an abstract `EchoServer` whose `dispatch`
+decodes the ordinal and routes to the matching handler.
+
+### Server
+
+Implement the abstract handlers; `dispatch` does the envelope decode and ordinal
+routing for you.
+
+```typescript
+import { EchoServer } from './gen/echo_zap.js';
+
+class Echo extends EchoServer {
+  async echo(req: EchoReq): Promise<EchoResp> {
+    return newEchoResp({ msg: req.msg() });
+  }
+
+  async notify(n: EchoReq): Promise<void> {
+    console.log('notified:', n.msg());
+  }
+}
+```
+
+### Client
+
+```typescript
+import { ZapClient } from '@zap-proto/zap/node';
+import { EchoClient } from './gen/echo_zap.js';
+
+const conn = await ZapClient.connect('localhost:9000');
+const echo = new EchoClient(conn);
+
+const resp = await echo.echo({ msg: 'hello' });
+console.log(resp.msg()); // "hello"
+
+conn.close();
+```
+
+## Driving the envelope directly
+
+Generated clients are the normal path, but the envelope is a public API. Build a
+request, send the bytes over any transport, and decode the response:
+
+```typescript
+import { buildRequest, parseResponse, NO_TARGET, Status, Message } from '@zap-proto/zap';
+
+const reqBytes = buildRequest({
+  method: 1,              // the interface method ordinal
+  promiseID: 0,
+  target: NO_TARGET,
+  cap: new Uint8Array(0),
+  payload,                // the request struct's bytes
+});
+
+// ... send reqBytes, receive responseBytes ...
+
+const res = parseResponse(responseBytes);
+if (res.status === Status.OK) {
+  const result = Message.parse(res.body).root(); // response struct, zero-copy
+}
+```
+
+## Transport framing
+
+The envelope is transport-agnostic; the Node TCP client
+(`@zap-proto/zap/node`) frames it as `[len UInt32 LE][payload]` with a 10 MB cap,
+opens with a nodeID handshake, and correlates responses to requests by
+`promiseID`. The same envelope rides over WebSocket and HTTP transports — see
+[Transports](/docs/transports).
+
+## Promise pipelining
+
+ZAP RPC is Level-1: the result of one call can be used as the `target` of
+another before the first result has returned. The client sends both calls back
+to back, tagging the second with the first's `promiseID`; the server resolves
+the chain locally and returns both results together. A two-round-trip dependent
+call collapses to one. The Node transport exposes this through `pipeline`
+(`@zap-proto/zap/node`), mirroring the Go runtime's `Client.Pipeline()`.
+
+## Next Steps
+
+<Cards>
+  <Card title="Schema Language" href="/docs/schema">
+    Declare the interfaces RPC is generated from
+  </Card>
+  <Card title="Code Generation" href="/docs/codegen">
+    Generate the typed clients and servers
+  </Card>
+  <Card title="Transports" href="/docs/transports">
+    Carry the envelope over TCP, WebSocket, or HTTP
+  </Card>
+</Cards>

@@ -1,109 +1,118 @@
 ---
 title: C++
-description: ZAP C++ SDK - High-performance native binding
+description: ZAP C++ SDK — the schema front-end + zero-copy runtime (cpp-core) and the high-level binding (cpp).
 ---
 
 # C++ Binding
 
-The C++ binding provides high-performance native access to ZAP with async I/O support.
+ZAP's C++ surface is split into two repositories with distinct roles:
 
-## Installation
+| Repository | Role |
+| --- | --- |
+| [`zap-proto/cpp-core`](https://github.com/zap-proto/cpp-core) | The canonical **schema front-end** (the `zap` compiler binary every language plugin execs) **plus** the underlying zero-copy C++ runtime and the KJ support library. Derived from `libcapnp`; ZAP adds the whitespace-significant grammar on top. |
+| [`zap-proto/cpp`](https://github.com/zap-proto/cpp) | The high-level C++ **binding** — the client/server convenience API that builds on the `cpp-core` runtime. |
 
-Using CMake FetchContent:
+If you are generating code for *another* language, you only need the front-end
+from `cpp-core` (it emits a binary code-generator request that your language's
+plugin consumes). If you are writing a C++ program, you use the `cpp-core`
+runtime headers (in `namespace zap`) plus the `cpp` binding for RPC convenience.
 
-```cmake
-include(FetchContent)
-FetchContent_Declare(
-  zap-cpp
-  GIT_REPOSITORY https://github.com/zap-proto/cpp
-  GIT_TAG v0.1.0
-)
-FetchContent_MakeAvailable(zap-cpp)
+## Build the front-end and runtime
 
-target_link_libraries(your_target PRIVATE zap::zap)
+`cpp-core` builds with Autotools, CMake, or Bazel:
+
+```bash
+# CMake
+cmake -S c++ -B build && cmake --build build
+
+# Autotools
+cd c++ && autoreconf -i && ./configure && make -j check
 ```
 
-## Quick Start
+`make check` builds the compiler (the `zap_tool` target) and runs the schema,
+compiler, and runtime test suites. The `zap` binary is what other runtimes shell
+out to.
+
+## Compile a schema
+
+The front-end parses a `.zap` file and emits a binary code-generator request on
+stdout; a language plugin consumes it. Plugins are resolved as `zap-<lang>`
+executables on `PATH`.
+
+```bash
+# Emit a code-generator request to stdout (what a plugin reads on stdin).
+zap compile -o- point.zap
+
+# Drive a language plugin found on PATH.
+zap compile -orust point.zap
+```
+
+ZAP schemas are whitespace-significant — blocks are delimited by indentation,
+there are no braces, and ordinals are assigned automatically. The brace form
+(`x @0 :Float32;`) still parses, and desugaring is a no-op on it, so both
+surfaces produce byte-identical schemas.
+
+## Build and read a message
+
+The runtime lives in `namespace zap` (the `cpp-core` headers). You build a
+message with a `MallocMessageBuilder`, initialize the root to your generated
+struct type, and read it back through a generated `Reader` — zero-copy, straight
+out of the segment memory.
 
 ```cpp
-#include <zap/zap.hpp>
-#include <iostream>
+#include <zap/message.h>
+#include <zap/serialize.h>
+#include "point.zap.h"   // generated from point.zap
 
-int main() {
-    auto client = zap::connect("zap://localhost:9000").wait();
+// Write.
+zap::MallocMessageBuilder message;
+Point::Builder point = message.initRoot<Point>();
+point.setX(1.5);
+point.setY(-2.5);
 
-    auto server = client->init({
-        .name = "my-agent",
-        .version = "1.0.0"
-    }).wait();
+kj::Array<zap::word> words = zap::messageToFlatArray(message);
 
-    std::cout << "Connected to: " << server.name << " v" << server.version << "\n";
-
-    auto tools = client->listTools().wait();
-    for (const auto& tool : tools) {
-        std::cout << "  " << tool.name << " - " << tool.description << "\n";
-    }
-
-    auto result = client->callTool({
-        .id = "call-1",
-        .name = "read_file",
-        .args = R"({"path": "/etc/hosts"})"
-    }).wait();
-
-    if (result.error.empty()) {
-        std::cout << "Result: " << result.content << "\n";
-    }
-
-    return 0;
-}
+// Read (zero-copy): the reader borrows the flat array; nothing is decoded.
+zap::FlatArrayMessageReader reader(words.asPtr());
+Point::Reader p = reader.getRoot<Point>();
+// p.getX() == 1.5, p.getY() == -2.5
 ```
 
-## Async API
+`writeMessageToFd` / `StreamFdMessageReader` (in `zap/serialize.h`) stream a
+message to and from a file descriptor; `serialize-packed.h` and
+`serialize-async.h` provide packed and async framing.
+
+## RPC
+
+The runtime's RPC is capability-based with promise pipelining, exposed through
+`zap/rpc-twoparty.h`. `TwoPartyServer` hosts a bootstrap capability over a
+connection; `TwoPartyClient` connects and retrieves it.
 
 ```cpp
-#include <zap/zap.hpp>
+#include <zap/rpc-twoparty.h>
 
-zap::Promise<void> runAgent() {
-    auto client = co_await zap::connect("zap://localhost:9000");
+// Server: host an implementation as the bootstrap capability.
+zap::TwoPartyServer server(kj::heap<PointTrackerImpl>());
+server.accept(std::move(connection));   // an AsyncIoStream
 
-    auto server = co_await client->init({
-        .name = "my-agent",
-        .version = "1.0.0"
-    });
+// Client: connect and call the bootstrap interface.
+zap::TwoPartyClient client(connection);
+PointTracker::Client tracker = client.bootstrap().castAs<PointTracker>();
 
-    auto tools = co_await client->listTools();
-
-    for (const auto& tool : tools) {
-        auto result = co_await client->callTool({
-            .id = tool.name,
-            .name = tool.name,
-            .args = "{}"
-        });
-        // Process result
-    }
-}
-
-int main() {
-    zap::EventLoop loop;
-    runAgent().wait();
-    return 0;
-}
+auto request = tracker.addPointRequest();
+request.setP(point);
+auto promise = request.send();          // pipelines; await with KJ's event loop
 ```
 
-## Gateway
-
-```cpp
-auto gateway = zap::Gateway::create();
-
-auto fsId = co_await gateway->addServer(
-    "filesystem",
-    "stdio://npx -y @modelcontextprotocol/server-filesystem /tmp",
-    {.transport = zap::Transport::Stdio}
-);
-
-auto tools = co_await gateway->listTools();
-```
+`PointTracker::Server` (generated) is the interface you subclass on the server
+side; `PointTracker::Client` (generated) is the typed proxy on the client side.
+Because a request's result can be used as the target of another call before it
+resolves, dependent calls collapse into a single round trip.
 
 ## Documentation
 
-Full documentation at [zap-proto/cpp](https://github.com/zap-proto/cpp).
+The schema toolchain and core runtime are documented in
+[`zap-proto/cpp-core`](https://github.com/zap-proto/cpp-core); the high-level
+binding is in [`zap-proto/cpp`](https://github.com/zap-proto/cpp). The
+[Schema Language](/docs/schema) and [Code Generation](/docs/codegen) pages cover
+the `.zap` surface this front-end parses.

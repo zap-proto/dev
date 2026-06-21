@@ -1,374 +1,232 @@
 ---
 title: Rust
-description: ZAP Rust SDK - Reference implementation
+description: ZAP Rust SDK — the zero-copy runtime, zapc codegen, Level-1 capability RPC, and the cap layer.
 ---
 
 # Rust Binding
 
-The Rust binding is the reference ZAP implementation with full async support, post-quantum cryptography, and Ringtail consensus.
+The Rust implementation of ZAP is a Cargo workspace
+([`zap-proto/rust`](https://github.com/zap-proto/rust)) providing the zero-copy
+message runtime, the Rust code-generation backend, and a Level-1 capability RPC
+stack. The schema compiler ships separately as the
+[`zap-schema`](https://crates.io/crates/zap-schema) crate, which also carries the
+capability runtime (`zap::cap`).
 
-## Installation
+ZAP describes data and interfaces in a whitespace-significant schema — no braces,
+no required byte-offsets; blocks are delimited by indentation and ordinals are
+assigned in declaration order. The legacy brace form still parses for backward
+compatibility.
 
-Add to your `Cargo.toml`:
+## Install
+
+The schema compiler and the runtime are obtained separately.
+
+**Schema compiler** — the CLI that turns a `.zap` file into Rust:
+
+```bash
+cargo install zap-schema     # provides the `zapc` binary
+```
+
+The `zap-schema` crate bundles the canonical schema front-end (the same parser
+every other language plugin uses, built from
+[`zap-proto/cpp-core`](https://github.com/zap-proto/cpp-core)) together with the
+Rust backend, so no external C++ toolchain is required at build time. The npm
+wrapper [`@zap-proto/zapc`](https://www.npmjs.com/package/@zap-proto/zapc)
+exposes the same backend for projects already on a Node toolchain — it downloads
+a prebuilt, checksum-verified binary on install:
+
+```bash
+npm install -g @zap-proto/zapc
+```
+
+**Runtime** — add the workspace crates you need to `Cargo.toml`:
 
 ```toml
 [dependencies]
-zap-proto = "0.1"
+zap = { git = "https://github.com/zap-proto/rust" }         # zero-copy messages
+zapc = { git = "https://github.com/zap-proto/rust" }        # build.rs codegen hook
+zap-rpc = { git = "https://github.com/zap-proto/rust" }     # capability RPC
+zap-futures = { git = "https://github.com/zap-proto/rust" } # async read/write
 tokio = { version = "1", features = ["full"] }
-
-# Optional features
-zap-proto = { version = "0.1", features = ["pq-tls", "ringtail", "did"] }
 ```
 
-## Quick Start
+## Codegen
+
+To generate code as part of a `cargo` build, call `zapc` from `build.rs`:
 
 ```rust
-use zap_protocol::{Zap, ClientInfo, ToolCall};
-use anyhow::Result;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Connect to ZAP server
-    let client = Zap::connect("zap://localhost:9000").await?;
-
-    // Initialize
-    let server = client.init(ClientInfo {
-        name: "my-agent".into(),
-        version: "1.0.0".into(),
-    }).await?;
-
-    println!("Connected to: {} v{}", server.name, server.version);
-
-    // List tools
-    let tools = client.list_tools().await?;
-    for tool in &tools {
-        println!("  {} - {}", tool.name, tool.description);
-    }
-
-    // Call a tool
-    let result = client.call_tool(&ToolCall {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: "read_file".into(),
-        args: serde_json::to_vec(&serde_json::json!({
-            "path": "/etc/hosts"
-        }))?,
-        metadata: Default::default(),
-    }).await?;
-
-    if let Some(err) = result.error {
-        eprintln!("Error: {}", err);
-    } else {
-        println!("Result: {}", String::from_utf8_lossy(&result.content));
-    }
-
-    Ok(())
+fn main() {
+    zapc::CompilerCommand::new()
+        .file("schema/hello_world.zap")
+        .run()
+        .expect("zap schema compile");
 }
 ```
 
-## Client API
+`zapc::CompilerCommand` execs the canonical `zap` schema front-end and feeds its
+code-generator request to the Rust backend — the whitespace grammar (and its
+brace back-compat) is handled entirely by that front-end, so there is exactly one
+schema parser across the whole stack.
 
-### Connection
+For this schema, the generated code includes a `point::Reader<'a>` with
+`get_x()` / `get_y()`, a `point::Builder<'a>` with `set_x()` / `set_y()`, and —
+for the interface — a `point_tracker::Server` trait and a `point_tracker::Client`:
+
+```zap
+struct Point
+  x Float32
+  y Float32
+
+interface PointTracker
+  addPoint (p Point) -> (totalPoints UInt64)
+```
+
+The `'a` lifetime records that a reader/builder borrows the raw buffer holding
+the encoded message — that buffer is never copied into a separate structure. The
+encoding doubles as the in-memory representation, so reading a field is zero-copy.
+
+## RPC
+
+`zap-rpc` is an object-capability RPC system with Level-1 promise pipelining.
+Generated from an interface, a `Server` trait carries one `async` method per
+declaration, and a `Client` carries one `*_request()` builder per method. For
+this schema:
+
+```zap
+interface HelloWorld
+  sayHello (request HelloRequest) -> (reply HelloReply)
+```
+
+### Server
+
+Implement the generated `Server` trait, then hand an instance to
+`zap_rpc::new_client` and serve it over a transport.
 
 ```rust
-use zap_protocol::{Zap, ConnectOptions};
+use zap_rpc::{rpc_twoparty_zap, twoparty, RpcSystem};
+use crate::hello_world_zap::hello_world;
+use futures::AsyncReadExt;
 
-// Simple connection
-let client = Zap::connect("zap://localhost:9000").await?;
+struct HelloWorldImpl;
 
-// With options
-let client = Zap::connect_with_options(
-    "zap+pq://localhost:9000",
-    ConnectOptions {
-        timeout: Duration::from_secs(30),
-        identity: Some(identity),
+impl hello_world::Server for HelloWorldImpl {
+    async fn say_hello(
+        self: std::rc::Rc<Self>,
+        params: hello_world::SayHelloParams,
+        mut results: hello_world::SayHelloResults,
+    ) -> Result<(), ::zap::Error> {
+        let name = params.get()?.get_request()?.get_name()?.to_str()?;
+        results.get().init_reply().set_message(format!("Hello, {name}!"));
+        Ok(())
+    }
+}
+
+// Bind a listener and serve the bootstrap capability:
+let hello_world_client: hello_world::Client = zap_rpc::new_client(HelloWorldImpl);
+let (stream, _) = listener.accept().await?;
+let (reader, writer) =
+    tokio_util::compat::TokioAsyncReadCompatExt::compat(stream).split();
+let network = twoparty::VatNetwork::new(
+    futures::io::BufReader::new(reader),
+    futures::io::BufWriter::new(writer),
+    rpc_twoparty_zap::Side::Server,
+    Default::default(),
+);
+let rpc_system =
+    RpcSystem::new(Box::new(network), Some(hello_world_client.client));
+tokio::task::spawn_local(rpc_system);
+```
+
+### Client
+
+Bootstrap the remote interface, build a request, and `await` the promise.
+
+```rust
+let mut rpc_system = RpcSystem::new(rpc_network, None);
+let hello_world: hello_world::Client =
+    rpc_system.bootstrap(rpc_twoparty_zap::Side::Server);
+tokio::task::spawn_local(rpc_system);
+
+let mut request = hello_world.say_hello_request();
+request.get().init_request().set_name("world");
+
+let reply = request.send().promise.await?;
+println!("{}", reply.get()?.get_reply()?.get_message()?.to_str()?); // Hello, world!
+```
+
+Because `say_hello_request()` returns a request whose result can be used as the
+target of another call before it resolves, dependent calls pipeline into a single
+round trip — that is the Level-1 feature.
+
+## Capabilities
+
+The [`zap-schema`](https://crates.io/crates/zap-schema) crate's `cap` module is
+the capability runtime. A `Capability` is a signed, attenuable token of authority
+over a `target`, granted to a `holder` by an `issuer`; caps form a chain via the
+`parent` field, and `Verifier::verify_chain` walks back to a root checking each
+signature, expiry, revocation, target invariance, and monotonically-narrowing
+permissions.
+
+```rust
+use zap::cap::{issue, Issuance, Verifier, Ed25519Signer, CapKind, Caveat, CaveatKind};
+
+// Mint a root cap. Ed25519Signer is the built-in mandatory scheme; ML-DSA-65 is
+// also provided, and a SchemeVerify hook wires hybrid / secp256k1.
+let signer = Ed25519Signer::generate();
+
+let cap = issue(
+    Issuance {
+        kind: CapKind::IamSession.value(),
+        target,                              // [u8; 32] resource hash
+        holder,                              // [u8; 32] holder hash
+        permissions: 0xDEAD_BEEF_CAFE_BABE,  // bits the holder may exercise
+        expires_at: 2_000_000_000,           // unix seconds; 0 = never
+        caveats: vec![
+            Caveat::new(CaveatKind::IpCidr, b"10.0.0.0/8".to_vec()),
+        ],
         ..Default::default()
-    }
-).await?;
+    },
+    &signer,
+)?;
+
+// Verify a single cap. The Verifier carries the policy as builder closures.
+let verifier = Verifier::new()
+    .with_issuer_key(move |_issuer| Ok(signer.public_key().to_vec()));
+verifier.verify(&cap, 1_700_000_000)?;       // Err(CapError::Expired) / Revoked / SigMismatch / …
 ```
 
-### Tools
+Derive a narrower child with `Capability::attenuate`; the parent must carry
+`PermAttenuate` (or be a `CapKind::Delegate` cap), permissions intersect, and
+expiry can only shrink. `cap.cap_id()` is `SHA-256(canonical_bytes ‖ Sig)` and
+`cap.canonical_bytes()` is the SPEC §3 signed scope — both byte-identical across
+language runtimes. `verify_chain(leaf, chain, op, target, holder, now)` validates
+a full chain.
 
-```rust
-// List tools
-let tools: Vec<Tool> = client.list_tools().await?;
+> The crate name on crates.io is `zap-schema`; its library name is `zap`, so you
+> `use zap::cap::…` after `zap-schema = "1"` (or the workspace `zap` crate, which
+> re-exports the cap types as `zap::cap_issue`, `zap::Capability`, etc.).
 
-// Call tool
-let call = ToolCall {
-    id: "call-1".into(),
-    name: "my_tool".into(),
-    args: b"{}".to_vec(),
-    metadata: Metadata::default(),
-};
-let result: ToolResult = client.call_tool(&call).await?;
+## Features
+
+- Tagged unions, generics, and forward-compatible protocol evolution
+- Canonicalization for deterministic, signable encodings
+- `Result`-based error handling — invalid pointers surface as errors, never UB
+- `no_std` and no-alloc support
+- Run-time reflection
+
+## Build
+
+```bash
+cargo build --release
 ```
 
-### Resources
-
-```rust
-// List resources
-let resources: Vec<Resource> = client.list_resources().await?;
-
-// Read resource
-let content: ResourceContent = client.read_resource("file:///etc/hosts").await?;
-
-// Subscribe to updates
-let stream = client.subscribe("file:///var/log/app.log").await?;
-while let Some(update) = stream.next().await {
-    println!("Update: {:?}", update);
-}
-```
-
-### Prompts
-
-```rust
-// List prompts
-let prompts: Vec<Prompt> = client.list_prompts().await?;
-
-// Get prompt messages
-let args = Metadata::from([("topic", "rust")]);
-let messages: Vec<PromptMessage> = client.get_prompt("code_review", args).await?;
-```
-
-## Gateway
-
-```rust
-use zap_protocol::{Gateway, ServerConfig, Transport, Auth};
-
-// Create gateway
-let gateway = Gateway::new().await?;
-
-// Add MCP server
-let id = gateway.add_server(
-    "filesystem",
-    "stdio://npx -y @modelcontextprotocol/server-filesystem /tmp",
-    ServerConfig {
-        transport: Transport::Stdio,
-        auth: None,
-        timeout: 30000,
-    }
-).await?;
-
-// Add with authentication
-let gh_id = gateway.add_server(
-    "github",
-    "stdio://npx -y @modelcontextprotocol/server-github",
-    ServerConfig {
-        transport: Transport::Stdio,
-        auth: Some(Auth::Bearer(std::env::var("GITHUB_TOKEN")?)),
-        timeout: 60000,
-    }
-).await?;
-
-// List all tools from all servers
-let tools = gateway.list_tools().await?;
-
-// Check server status
-let status = gateway.server_status(&id).await?;
-println!("Server status: {:?}", status);
-```
-
-## Post-Quantum TLS
-
-Enable the `pq-tls` feature:
-
-```toml
-[dependencies]
-zap-proto = { version = "0.1", features = ["pq-tls"] }
-```
-
-```rust
-use zap_protocol::{Zap, PQIdentity};
-
-// Generate or load identity
-let identity = PQIdentity::generate()?;
-// or
-let identity = PQIdentity::load("./identity.key")?;
-
-// Connect with PQ-TLS
-let client = Zap::connect_pq(
-    "zap+pq://localhost:9000",
-    identity,
-).await?;
-```
-
-## Ringtail Consensus
-
-Enable the `ringtail` feature:
-
-```toml
-[dependencies]
-zap-proto = { version = "0.1", features = ["ringtail"] }
-```
-
-```rust
-use zap_protocol::ringtail::{Party, Coordinator, SignRequest};
-
-// Create party
-let party = Party::new(party_id, total_parties, threshold)?;
-
-// Join coordinator
-let coordinator = Coordinator::connect("zap://coordinator:9001").await?;
-coordinator.register(&party).await?;
-
-// Sign message
-let request = SignRequest {
-    message: b"Sign this message".to_vec(),
-    session_id: 1,
-    participants: vec![0, 1, 2],
-    timeout_ms: 30000,
-};
-
-let signature = coordinator.sign(request).await?;
-
-// Verify
-let valid = party.verify(&signature, b"Sign this message")?;
-```
-
-## DID Support
-
-Enable the `did` feature:
-
-```toml
-[dependencies]
-zap-proto = { version = "0.1", features = ["did"] }
-```
-
-```rust
-use zap_protocol::did::{Did, DidMethod, DidRegistry};
-
-// Create DID
-let did = Did::new(DidMethod::Key, public_key)?;
-println!("DID: {}", did);  // did:key:z6Mk...
-
-// Connect to registry
-let registry = DidRegistry::connect("zap://did-registry:9002").await?;
-
-// Resolve DID
-let doc = registry.resolve(&did).await?;
-println!("Controller: {}", doc.controller);
-
-// Create blockchain-anchored DID
-let lux_did = registry.create(DidMethod::Lux, public_key, services).await?;
-```
-
-## Error Handling
-
-```rust
-use zap_protocol::{Error, ErrorKind};
-
-match client.call_tool(&call).await {
-    Ok(result) => {
-        if let Some(err) = result.error {
-            println!("Tool error: {}", err);
-        }
-    }
-    Err(Error { kind: ErrorKind::Disconnected, .. }) => {
-        println!("Connection lost, reconnecting...");
-        client.reconnect().await?;
-    }
-    Err(Error { kind: ErrorKind::Timeout, .. }) => {
-        println!("Request timed out");
-    }
-    Err(e) => {
-        return Err(e.into());
-    }
-}
-```
-
-## Server Implementation
-
-```rust
-use zap_protocol::server::{Server, ZapImpl};
-
-struct MyZapServer;
-
-#[async_trait]
-impl ZapImpl for MyZapServer {
-    async fn init(&self, client: ClientInfo) -> Result<ServerInfo> {
-        Ok(ServerInfo {
-            name: "my-server".into(),
-            version: "1.0.0".into(),
-            capabilities: Capabilities {
-                tools: true,
-                resources: true,
-                prompts: false,
-                logging: true,
-            },
-        })
-    }
-
-    async fn list_tools(&self) -> Result<Vec<Tool>> {
-        Ok(vec![
-            Tool {
-                name: "hello".into(),
-                description: "Says hello".into(),
-                schema: serde_json::to_vec(&json!({
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string" }
-                    }
-                }))?,
-                annotations: Default::default(),
-            }
-        ])
-    }
-
-    async fn call_tool(&self, call: ToolCall) -> Result<ToolResult> {
-        match call.name.as_str() {
-            "hello" => {
-                let args: serde_json::Value = serde_json::from_slice(&call.args)?;
-                let name = args["name"].as_str().unwrap_or("World");
-                Ok(ToolResult {
-                    id: call.id,
-                    content: format!("Hello, {}!", name).into_bytes(),
-                    error: None,
-                    metadata: Default::default(),
-                })
-            }
-            _ => Ok(ToolResult {
-                id: call.id,
-                content: vec![],
-                error: Some("Unknown tool".into()),
-                metadata: Default::default(),
-            }),
-        }
-    }
-
-    // ... other methods
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let server = Server::new(MyZapServer).listen("0.0.0.0:9000").await?;
-    server.run().await?;
-    Ok(())
-}
-```
-
-## Testing
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use zap_protocol::testing::MockZap;
-
-    #[tokio::test]
-    async fn test_tool_call() {
-        let mut mock = MockZap::new();
-        mock.expect_list_tools().returning(|| Ok(vec![
-            Tool { name: "test".into(), ..Default::default() }
-        ]));
-
-        let tools = mock.list_tools().await.unwrap();
-        assert_eq!(tools.len(), 1);
-    }
-}
-```
+The library crates (`zap`, `zapc`, `zap-rpc`, `zap-futures`) build with no
+external tooling. The example, test, and benchmark crates additionally need the
+`zap` schema front-end on `PATH` (CI provisions it by building `zap_tool` from
+`zap-proto/cpp-core`).
 
 ## Examples
 
-Full examples available at:
-- [zap-proto/examples/client.rs](https://github.com/zap-proto/spec-rs/blob/main/examples/client.rs)
-- [zap-proto/examples/server.rs](https://github.com/zap-proto/spec-rs/blob/main/examples/server.rs)
-- [zap-proto/examples/gateway.rs](https://github.com/zap-proto/spec-rs/blob/main/examples/gateway.rs)
+- [zap-rpc/examples/hello-world](https://github.com/zap-proto/rust/tree/main/zap-rpc/examples/hello-world) — the generated client/server above, end to end
+- [zap-rpc/examples](https://github.com/zap-proto/rust/tree/main/zap-rpc/examples) — calculator, pubsub, streaming, reconnect
+- [example/addressbook](https://github.com/zap-proto/rust/tree/main/example/addressbook) — serialization round-trip

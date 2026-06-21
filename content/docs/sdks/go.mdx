@@ -1,364 +1,284 @@
 ---
 title: Go
-description: ZAP Go SDK - Idiomatic Go binding
+description: ZAP Go SDK — the canonical zero-copy wire runtime, capability layer, and zapgen RPC codegen.
 ---
 
 # Go Binding
 
-The Go binding provides an idiomatic Go interface to ZAP with goroutine-safe clients and full Gateway support.
+[`github.com/zap-proto/go`](https://github.com/zap-proto/go) is the **canonical**
+Go runtime for the ZAP wire format. It is pure standard library — zero external
+dependencies — and is the reference every other language runtime is checked
+against: a buffer built here parses unchanged through the TypeScript and Python
+runtimes, and vice versa (pinned by a shared golden vector).
+
+The module is the read side (`Parse` / `Message` / `Object` / `List`), the write
+side (`Builder` / `ObjectBuilder` / `ListBuilder`), the capability runtime
+(`cap`), the RPC call envelope (`rpc`), and the schema compiler (`cmd/zapgen`).
+It is not a network library — listeners, transports, and handshakes live
+downstream; the `rpc` package defines the call *envelope* (the bytes), and the
+generated client takes a channel you supply.
 
 ## Installation
 
 ```bash
-go get github.com/zap-proto/go
+go get github.com/zap-proto/go@v1.3.0
 ```
 
-## Quick Start
+The schema compiler installs as a separate binary:
+
+```bash
+go install github.com/zap-proto/go/cmd/zapgen@v1.3.0
+```
+
+## Round-trip
+
+Build a message, then parse it back zero-copy. `StartObject` lays out a struct's
+fixed section; `Parse` validates the header and `Root()` returns an `Object` that
+reads fields straight out of the buffer — no decode step, no allocation.
 
 ```go
 package main
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
+	"fmt"
 
-    zap "github.com/zap-proto/go"
+	zap "github.com/zap-proto/go"
 )
 
 func main() {
-    ctx := context.Background()
+	// Write: a struct with a uint32 at offset 0 and a text field at offset 8.
+	b := zap.NewBuilder(256)
+	ob := b.StartObject(16) // 16-byte fixed section
+	ob.SetUint32(0, 0xDEADBEEF)
+	ob.SetText(8, "zap")
+	ob.FinishAsRoot()
+	buf := b.Finish() // []byte — the ZAP wire message
 
-    // Connect to ZAP server
-    client, err := zap.Connect(ctx, "zap://localhost:9000")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer client.Close()
-
-    // Initialize
-    server, err := client.Init(ctx, &zap.ClientInfo{
-        Name:    "my-agent",
-        Version: "1.0.0",
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Printf("Connected to: %s v%s\n", server.Name, server.Version)
-
-    // List tools
-    tools, err := client.ListTools(ctx)
-    if err != nil {
-        log.Fatal(err)
-    }
-    for _, tool := range tools {
-        fmt.Printf("  %s - %s\n", tool.Name, tool.Description)
-    }
-
-    // Call a tool
-    args, _ := json.Marshal(map[string]string{"path": "/etc/hosts"})
-    result, err := client.CallTool(ctx, &zap.ToolCall{
-        ID:   "call-1",
-        Name: "read_file",
-        Args: args,
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    if result.Error != "" {
-        log.Printf("Error: %s", result.Error)
-    } else {
-        fmt.Printf("Result: %s\n", result.Content)
-    }
+	// Read: zero-copy. The Message aliases buf; nothing is deserialized.
+	msg, err := zap.Parse(buf)
+	if err != nil {
+		panic(err)
+	}
+	root := msg.Root()
+	fmt.Printf("%#x %q\n", root.Uint32(0), root.Text(8)) // 0xdeadbeef "zap"
 }
 ```
 
-## Client API
+Field offsets are explicit here to show the runtime, but in real code you don't
+write them by hand — `zapgen` generates a typed View + Builder per struct from a
+`.zap` schema (see [Codegen](#codegen) below). The header is a fixed 16 bytes
+(`ZAP\x00` magic, version, flags, root offset, size); `NewBuilder` emits
+version 1, and `Parse` accepts version 1 and 2.
 
-### Connection
+## Codegen
 
-```go
-// Simple connection
-client, err := zap.Connect(ctx, "zap://localhost:9000")
+`zapgen` reads a `.zap` schema and emits, per `struct`, a zero-copy `View` +
+`Input`/`New` builder, and per `interface`, a typed RPC client, an abstract
+ordinal-dispatch server, and a 1-based method-ordinal table over the `rpc`
+envelope. Both schema forms — brace and whitespace-significant — go through one
+parser.
 
-// With options
-client, err := zap.Connect(ctx, "zap://localhost:9000",
-    zap.WithTimeout(30*time.Second),
-    zap.WithIdentity(identity),
-    zap.WithTLS(tlsConfig),
-)
+```bash
+zapgen schema.zap            # emit one <struct>_zap.go per struct, next to the input
+zapgen -out ./gen schema.zap # emit into the given directory
+zapgen -single schema.zap    # emit one combined <schema>_zap.go
 ```
 
-### Tools
+Drop a directive at the top of the consuming package and run `go generate ./...`:
 
 ```go
-// List tools
-tools, err := client.ListTools(ctx)
-
-// Call tool
-result, err := client.CallTool(ctx, &zap.ToolCall{
-    ID:   uuid.New().String(),
-    Name: "my_tool",
-    Args: []byte(`{"param": "value"}`),
-})
+//go:generate zapgen schema.zap
 ```
 
-### Resources
+For this schema:
+
+```zap
+struct Ping
+    Seq u64
+
+struct Pong
+    Seq u64
+
+interface Echo
+    ping(req: Ping) returns (resp: Pong)
+    notify(req: Ping)
+    health() returns (resp: Pong)
+    shutdown()
+```
+
+`zapgen` emits `NewPing(PingInput{Seq: 41})` (build → `[]byte`) and
+`WrapPing(b)` (parse → typed `Ping` view with a `Seq()` getter), plus the Echo
+client/server described under [RPC](#rpc). Method ordinals auto-assign
+`1, 2, 3, …` in declaration order, so appending a method never renumbers the
+existing ones — wire compatibility is preserved.
+
+## RPC
+
+An `interface` becomes a typed client and an abstract server, carried over the
+wire by the fixed **call envelope** in package `rpc`. The envelope is
+transport-agnostic: the generated `EchoClient` takes an `EchoChannel` you supply
+(your read/write loop), and the generated `DispatchEcho` routes a decoded
+envelope to your handler. Sockets and framing stay downstream.
+
+### Server
+
+Implement the generated handler interface; `DispatchEcho` does the envelope
+decode and ordinal routing.
 
 ```go
-// List resources
-resources, err := client.ListResources(ctx)
+type echoHandler struct{}
 
-// Read resource
-content, err := client.ReadResource(ctx, "file:///etc/hosts")
-
-// Subscribe to updates
-stream, err := client.Subscribe(ctx, "file:///var/log/app.log")
-for {
-    update, done, err := stream.Next(ctx)
-    if err != nil {
-        log.Fatal(err)
-    }
-    if done {
-        break
-    }
-    fmt.Printf("Update: %s\n", update.Content)
+func (h *echoHandler) Ping(req []byte) ([]byte, error) {
+	p, err := WrapPing(req)
+	if err != nil {
+		return nil, err
+	}
+	return NewPong(PongInput{Seq: p.Seq() + 1}), nil
 }
+
+func (h *echoHandler) Notify(req []byte) error   { return nil }
+func (h *echoHandler) Health() ([]byte, error)   { return NewPong(PongInput{Seq: 1}), nil }
+func (h *echoHandler) Shutdown() error           { return nil }
+
+// In your read loop, for each inbound envelope:
+//   respBytes, err := DispatchEcho(handler, envelope)
+// An unknown ordinal yields a StatusNotFound response; a handler error yields
+// StatusInternal — both as valid response envelopes, not transport errors.
 ```
 
-### Prompts
+### Client
+
+`NewEchoClient` takes the channel and an optional capability token attached to
+every request. Each method builds a request envelope, sends it over the channel,
+and checks the response status. A request method returns three values: an
+`rpc.Promise` (for pipelining), the response body, and an error.
 
 ```go
-// List prompts
-prompts, err := client.ListPrompts(ctx)
-
-// Get prompt messages
-messages, err := client.GetPrompt(ctx, "code_review", zap.Metadata{
-    {"topic", "go"},
-})
-```
-
-## Gateway
-
-```go
-// Create gateway
-gateway := zap.NewGateway()
-
-// Add MCP server
-fsID, err := gateway.AddServer(ctx, "filesystem",
-    "stdio://npx -y @modelcontextprotocol/server-filesystem /tmp",
-    &zap.ServerConfig{
-        Transport: zap.TransportStdio,
-    })
-
-// Add with authentication
-ghID, err := gateway.AddServer(ctx, "github",
-    "stdio://npx -y @modelcontextprotocol/server-github",
-    &zap.ServerConfig{
-        Transport: zap.TransportStdio,
-        Auth: &zap.Auth{
-            Bearer: os.Getenv("GITHUB_TOKEN"),
-        },
-        Timeout: 60000,
-    })
-
-// List all tools
-tools, _ := gateway.ListTools(ctx)
-
-// Check status
-status, _ := gateway.ServerStatus(ctx, fsID)
-fmt.Printf("Status: %v\n", status)
-
-// Remove server
-gateway.RemoveServer(ctx, fsID)
-```
-
-## Post-Quantum TLS
-
-```go
-import "github.com/zap-proto/go/pq"
-
-// Generate identity
-identity, err := pq.GenerateIdentity()
-
-// Or load from file
-identity, err := pq.LoadIdentity("./identity.key")
-
-// Connect with PQ-TLS
-client, err := zap.Connect(ctx, "zap+pq://localhost:9000",
-    zap.WithPQIdentity(identity),
-)
-```
-
-## DID Support
-
-```go
-import "github.com/zap-proto/go/did"
-
-// Create DID
-d := did.New(did.MethodKey, publicKey)
-fmt.Println(d) // did:key:z6Mk...
-
-// Connect to registry
-registry, err := did.ConnectRegistry(ctx, "zap://did-registry:9002")
-
-// Resolve DID
-doc, err := registry.Resolve(ctx, d)
-fmt.Printf("Controller: %s\n", doc.Controller)
-
-// Create Lux DID
-luxDID, err := registry.Create(ctx, did.MethodLux, publicKey, nil)
-```
-
-## Error Handling
-
-```go
-result, err := client.CallTool(ctx, call)
+client := NewEchoClient(channel, capToken) // capToken may be nil
+_, body, err := client.Ping(NewPing(PingInput{Seq: 41}))
 if err != nil {
-    var zapErr *zap.Error
-    if errors.As(err, &zapErr) {
-        switch zapErr.Type {
-        case zap.ErrDisconnected:
-            log.Println("Connection lost, reconnecting...")
-            client.Reconnect(ctx)
-        case zap.ErrTimeout:
-            log.Println("Request timed out")
-        default:
-            log.Printf("ZAP error: %v", zapErr)
-        }
-    }
-    return err
+	return err
 }
-
-if result.Error != "" {
-    log.Printf("Tool error: %s", result.Error)
+pong, err := WrapPong(body)
+if err != nil {
+	return err
 }
+fmt.Println(pong.Seq()) // 42
 ```
 
-## Server Implementation
+The leading `rpc.Promise` lets you pipeline a dependent call before the first
+result returns: each method has an `On` variant (`PingOn(promise)`) that targets
+a prior call's promise, collapsing two round trips into one.
+
+`EchoChannel` is the one interface you implement to bind a transport:
 
 ```go
-package main
-
-import (
-    "context"
-    "encoding/json"
-
-    zap "github.com/zap-proto/go"
-    "github.com/zap-proto/go/server"
-)
-
-type MyServer struct{}
-
-func (s *MyServer) Init(ctx context.Context, client *zap.ClientInfo) (*zap.ServerInfo, error) {
-    return &zap.ServerInfo{
-        Name:    "my-server",
-        Version: "1.0.0",
-        Capabilities: zap.Capabilities{
-            Tools:     true,
-            Resources: true,
-        },
-    }, nil
-}
-
-func (s *MyServer) ListTools(ctx context.Context) ([]*zap.Tool, error) {
-    return []*zap.Tool{
-        {
-            Name:        "hello",
-            Description: "Says hello",
-            Schema:      []byte(`{"type":"object","properties":{"name":{"type":"string"}}}`),
-        },
-    }, nil
-}
-
-func (s *MyServer) CallTool(ctx context.Context, call *zap.ToolCall) (*zap.ToolResult, error) {
-    switch call.Name {
-    case "hello":
-        var args struct{ Name string }
-        json.Unmarshal(call.Args, &args)
-        if args.Name == "" {
-            args.Name = "World"
-        }
-        return &zap.ToolResult{
-            ID:      call.ID,
-            Content: []byte(fmt.Sprintf("Hello, %s!", args.Name)),
-        }, nil
-    default:
-        return &zap.ToolResult{
-            ID:    call.ID,
-            Error: "Unknown tool",
-        }, nil
-    }
-}
-
-// ... other methods
-
-func main() {
-    srv := server.New(&MyServer{})
-    if err := srv.ListenAndServe(":9000"); err != nil {
-        log.Fatal(err)
-    }
+type EchoChannel interface {
+	Call(envelope []byte) (rpc.Response, error)
 }
 ```
+
+### Driving the envelope directly
+
+Generated clients are the normal path, but `rpc` is a public API. Build a
+request, ship the bytes over any transport, decode the response:
+
+```go
+import "github.com/zap-proto/go/rpc"
+
+reqBytes := rpc.BuildRequest(rpc.Call{
+	Method:  1,            // the interface method ordinal
+	Target:  rpc.NoTarget, // not pipelining off an earlier promise
+	Cap:     capToken,     // capability bytes, or nil
+	Payload: req,          // the request struct's bytes
+})
+
+// ... send reqBytes, receive respBytes ...
+
+resp, err := rpc.ParseResponse(respBytes)
+if err != nil {
+	return err
+}
+if resp.Status == rpc.StatusOK {
+	pong, _ := WrapPong(resp.Body) // the response struct, zero-copy
+	_ = pong
+}
+```
+
+Status codes are `StatusOK` (200), `StatusBadRequest` (400),
+`StatusUnauthorized` (401), `StatusForbidden` (403), `StatusNotFound` (404), and
+`StatusInternal` (500).
+
+## Capabilities
+
+Package `cap` is the ZAP capability runtime. A `Cap` is a signed, attenuable
+token of authority over a `Target`, granted to a `Holder` by an `Issuer`. Caps
+form a chain via the `Parent` field; `VerifyChain` walks back to a root checking
+each signature, expiry, revocation, target invariance, and
+monotonically-narrowing permissions.
+
+```go
+import "github.com/zap-proto/go/cap"
+
+// Mint a root cap. Ed25519Signer is the built-in mandatory scheme; wire a
+// SchemeVerify hook + matching Signer for ML-DSA-65 / hybrid / secp256k1.
+signer, _ := cap.NewEd25519Signer()
+
+var target, holder [32]byte // 32-byte content hashes of the resource + holder
+c, err := cap.Issue(cap.Issuance{
+	Kind:        uint32(cap.KindIAMSession),
+	Target:      target,
+	Holder:      holder,
+	Permissions: cap.PermAttenuate, // bits the holder may exercise / delegate
+	ExpiresAt:   2_000_000_000,     // unix seconds; 0 = never
+}, signer)
+if err != nil {
+	return err
+}
+
+// Verify a single cap. The Verifier holds the policy: revocation lookup,
+// issuer-key resolution, and (optionally) a PQ signature hook.
+v := cap.Verifier{
+	IssuerKey: func(issuer [32]byte) ([]byte, error) {
+		if issuer == signer.Public() {
+			return signer.PublicKey(), nil
+		}
+		return nil, cap.ErrIssuerUnknown
+	},
+}
+if err := v.Verify(c, 1_700_000_000); err != nil { // now, in unix seconds
+	return err // ErrExpired, ErrRevoked, ErrSigMismatch, ErrIssuerUnknown, …
+}
+```
+
+Derive a narrower child with `Attenuate` — the signer must hold the parent's
+holder key, permissions intersect with the parent's, expiry can only shrink, and
+the parent must carry `PermAttenuate` (or be a `KindDelegate` cap):
+
+```go
+child, err := cap.Attenuate(c, childHolder, cap.PermAudit, nil, 0, signer)
+```
+
+Signature scope is the SPEC §3 canonical bytes (`cap.CanonicalBytes`), and
+`CapID = SHA-256(CanonicalBytes ‖ Sig)` (`Cap.ID`), so cap identifiers are
+byte-identical across every language runtime. `Revoke` / `VerifyRevocation`
+handle revocation; `VerifyChain(leaf, chain, op, target, holder, now)` validates
+a full chain including the op-against-mask and delegation gate.
 
 ## Concurrency
 
-The Go client is goroutine-safe:
+`Parse` aliases the input buffer and `Object` is a value type holding a pointer
+to the immutable message, so reads are safe to share across goroutines. A
+`Builder` is single-owner — build per goroutine, not shared.
 
-```go
-var wg sync.WaitGroup
-for i := 0; i < 10; i++ {
-    wg.Add(1)
-    go func(id int) {
-        defer wg.Done()
-        result, err := client.CallTool(ctx, &zap.ToolCall{
-            ID:   fmt.Sprintf("call-%d", id),
-            Name: "my_tool",
-            Args: []byte(`{}`),
-        })
-        if err != nil {
-            log.Printf("Call %d failed: %v", id, err)
-            return
-        }
-        log.Printf("Call %d: %s", id, result.Content)
-    }(i)
-}
-wg.Wait()
-```
+## Build & test
 
-## Testing
-
-```go
-package myapp
-
-import (
-    "testing"
-
-    zap "github.com/zap-proto/go"
-    "github.com/zap-proto/go/testing/mock"
-)
-
-func TestToolCall(t *testing.T) {
-    m := mock.NewZap()
-    m.On("ListTools").Return([]*zap.Tool{
-        {Name: "test"},
-    }, nil)
-
-    tools, err := m.ListTools(context.Background())
-    if err != nil {
-        t.Fatal(err)
-    }
-    if len(tools) != 1 {
-        t.Errorf("expected 1 tool, got %d", len(tools))
-    }
-}
+```bash
+go build ./...
+go test ./...
 ```
 
 ## Examples
 
-Full examples at:
-- [examples/client](https://github.com/zap-proto/go/tree/main/examples/client)
-- [examples/server](https://github.com/zap-proto/go/tree/main/examples/server)
-- [examples/gateway](https://github.com/zap-proto/go/tree/main/examples/gateway)
+- [examples/echo](https://github.com/zap-proto/go/tree/main/examples/echo) — a generated Echo RPC service with an in-memory client/server round-trip
+- [cap/cap_test.go](https://github.com/zap-proto/go/blob/main/cap/cap_test.go) — issue, attenuate, chain walk, revocation, caveats

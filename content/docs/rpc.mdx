@@ -136,12 +136,104 @@ opens with a nodeID handshake, and correlates responses to requests by
 
 ## Promise pipelining
 
-ZAP RPC is Level-1: the result of one call can be used as the `target` of
-another before the first result has returned. The client sends both calls back
-to back, tagging the second with the first's `promiseID`; the server resolves
-the chain locally and returns both results together. A two-round-trip dependent
-call collapses to one. The Node transport exposes this through `pipeline`
-(`@zap-proto/zap/node`), mirroring the Go runtime's `Client.Pipeline()`.
+ZAP RPC is Level-1: the result of one call can be used as the input of another
+before the first result has returned. This collapses a dependent two-round-trip
+exchange into one.
+
+### The Target model
+
+There is **one** canonical pipelining model, byte-identical across the Go,
+TypeScript, and Python runtimes. It rides on two envelope fields already shown
+above — `promiseID` and `target` — and needs no new wire format:
+
+- A call carries a caller-assigned **`promiseID`** — the id its answer resolves
+  to.
+- A **dependent** call sets **`target`** to a prior call's `promiseID`. That
+  means: *before dispatching me, substitute the resolved body of the call that
+  answered to that `promiseID` as my payload.*
+
+The two calls ship back to back; the server chains them. The dependent never
+waits for the first answer to round-trip back to the caller. A non-pipelined call
+sets `target = NO_TARGET` (`0`), so a pipelining server and a plain dispatcher
+are wire-compatible — a non-pipelining peer in any language interoperates by
+simply never setting `target`.
+
+Two pieces implement it, each in one place:
+
+- **`Session`** (client side) allocates `promiseID`s and stamps `target` onto a
+  dependent call — `Origin`/`origin` builds the first call, `Pipeline`/`pipe`
+  builds the dependent.
+- **`Pipeliner`** (server side) is a per-connection promise table. It records
+  every OK answer under its `promiseID`, substitutes a resolved target's body for
+  a dependent's payload before dispatch, and **queues** a dependent whose target
+  has not resolved yet until it does. It **refuses** (`400 BadRequest`) a
+  dependent whose target answered non-OK or was finished — so it never hangs.
+  `Finish` bounds the table by dropping an answer once no further call will
+  pipeline on it.
+
+### Example
+
+Authenticate, then immediately pipeline a second call on the auth result:
+
+<Tabs items={["Go", "Python", "TypeScript"]}>
+<Tab value="Go">
+```go
+import "github.com/zap-proto/go/rpc"
+
+sess := rpc.NewSession()
+srv := rpc.NewPipeliner(DispatchAccount(handler)) // wraps a generated Dispatch<Iface>
+
+// A: authenticate (Target = NoTarget). Its answer resolves to promise p.
+p := sess.Next()
+aResp, _ := srv.Handle(rpc.BuildRequest(sess.Origin(p, AuthOrdinal, capToken, authReq)))
+
+// B: pipeline on A — the server feeds A's resolved body in as B's payload.
+q := sess.Next()
+bResp, _ := srv.Handle(rpc.BuildRequest(sess.Pipeline(q, p, GetBalanceOrdinal, capToken, nil)))
+```
+</Tab>
+<Tab value="Python">
+```python
+from zap import Session, Pipeliner, build_request
+
+sess = Session()
+srv = Pipeliner(dispatch)  # dispatch(envelope) -> response envelope
+
+# A: authenticate (target = NO_TARGET). Its answer resolves to promise p.
+p = sess.next()
+a_resp = srv.handle(build_request(sess.origin(p, AUTH_ORDINAL, cap_token, auth_req)))
+
+# B: pipeline on A — the server feeds A's resolved body in as B's payload.
+q = sess.next()
+b_resp = srv.handle(build_request(sess.pipeline(q, p, GET_BALANCE_ORDINAL, cap_token, b"")))
+```
+</Tab>
+<Tab value="TypeScript">
+```typescript
+import { Session, Pipeliner, buildRequest } from '@zap-proto/zap';
+
+const sess = new Session();
+const srv = new Pipeliner(dispatch); // (envelope) => Promise<responseEnvelope>
+
+// A: authenticate (target = NO_TARGET). Its answer resolves to promise p.
+const p = sess.next();
+const aResp = await srv.handle(buildRequest(sess.origin(p, AUTH_ORDINAL, capToken, authReq)));
+
+// B: pipeline on A — the server feeds A's resolved body in as B's payload.
+const q = sess.next();
+const bResp = await srv.handle(buildRequest(sess.pipe(q, p, GET_BALANCE_ORDINAL, capToken)));
+```
+</Tab>
+</Tabs>
+
+The request/response envelopes (`BuildRequest`/`build_request`/`buildRequest`)
+are byte-for-byte identical across these three runtimes, so the same pipelined
+exchange round-trips between any of them. The Rust stack (`zap-rpc`) implements
+the richer Cap'n-Proto `PromisedAnswer` (transform-path) model — a superset that
+interoperates at the envelope level for non-pipelined calls. The Node TCP
+transport additionally exposes a two-connection `pipeline` helper
+(`@zap-proto/zap/node`) that ships the dependent leg on a second socket so two
+calls are genuinely in flight at the wire level.
 
 ## Next Steps
 

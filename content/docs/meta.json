@@ -10,6 +10,7 @@
     "schema",
     "codegen",
     "rpc",
+    "capabilities",
     "transports",
     "post-quantum",
     "gateway",

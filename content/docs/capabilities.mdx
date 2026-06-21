@@ -1,0 +1,362 @@
+---
+title: Capabilities
+description: ZAP's capability layer — signed, attenuable authority tokens with fail-closed scheme dispatch, byte-identical across Go, Python, Rust, and TypeScript.
+---
+
+# Capabilities
+
+A bearer token is *ambient* authority: anyone holding the bytes can exercise
+every right encoded in them, against any service that trusts the issuer, until
+expiry. JWT is the worst case — opaque scope strings, no narrowing primitive, no
+binding to the wielder, no in-band revocation.
+
+A **capability** is a *specific* authority. It names the `Target` object, the
+`Holder` keypair, the `Issuer`, a `Permissions` bitmask, and a `Parent` in a
+signed chain. It is unforgeable (signature), non-transferable (`Holder` binds to
+a key the wielder must possess), and revocable (publishing a cap's ID kills it
+and every descendant). **Attenuation** — issuing a *narrower* child — is a
+normal operation, not an escape hatch.
+
+ZAP capabilities are plain ZAP messages: fixed offsets, zero-copy reads. A
+verifier walks a chain in O(chain length) with no allocation and no schema
+lookup, on the same code path regardless of which service issued the cap. The
+canonical schema and rules live in
+[`zap-proto/zap-spec`](https://github.com/zap-proto/zap-spec) —
+`SPEC.md` §2.3 / §3 / §4 and `capabilities_kinds.md`.
+
+> **Cross-language by construction.** The signed scope and the CapID are defined
+> on bytes, not on any language's object model. A cap signed by the Go runtime
+> decodes, recomputes the same CapID, and verifies in Python, Rust, and
+> TypeScript — pinned by a shared Go-signed known-answer test in each runtime.
+
+## Anatomy
+
+A `Capability` is the v1.1 `capabilities.zap` struct (3572 bytes fixed, with a
+3408-byte signature footer). Its fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `Kind` | `UInt32` | What authority this confers — `IAMSession`, `KMSSign`, `MPCSign`, `Delegate`, … |
+| `Target` | `bytes_fixed[32]` | Content hash of the resource the cap is about. |
+| `Holder` | `bytes_fixed[32]` | Hash of the keypair that may wield the cap. |
+| `Issuer` | `bytes_fixed[32]` | Hash of the signing key. For a child, equals the parent's `Holder`. |
+| `Permissions` | `UInt64` | The op bitmask. The top bits are cross-cutting (`PermAttenuate = 1<<32`, `PermAudit = 1<<33`, `PermRoot = 1<<63`). |
+| `Parent` | `bytes_fixed[32]` | The parent cap's ID. All-zero = root. |
+| `IssuedAt` / `ExpiresAt` | `UInt64` | Unix seconds. `ExpiresAt = 0` means never. |
+| `Caveats` | `List` | Constraints AND-composed across the whole chain (`ExpiresAt`, `MaxAmount`, `DestChain`, `IPCIDR`, `NonceHash`, …). |
+| `Sig` | `bytes_fixed[3408]` | The signature, with the algorithm tag in its final byte. |
+
+The **CapID** is `SHA-256(canonical_bytes(cap) || Sig)`. SHA-256 is mandated (not
+BLAKE3) because it is in every target language's standard library, which keeps
+the runtime zero-dependency and the cross-language CapID trivially reproducible.
+
+## The signed scope (SPEC §3)
+
+The signature does **not** cover the whole buffer. The signed bytes are the
+canonical concatenation of:
+
+1. `Capability` fixed header bytes `[0..164)` — `Kind` through the `Caveats`
+   list pointer.
+2. Each `Caveat` encoded as `Kind:u32-LE || len(Value):u32-LE || Value`, in list
+   order.
+
+This **excludes** the `Sig` field and the ZAP heap-area indirection bytes, so the
+signed bytes are identical across language runtimes and across signature schemes
+— heap layout cannot be tampered with without breaking the signature. The signer
+and verifier compute these bytes on one shared code path (`canonicalBytes` /
+`canonical_bytes`), so there is no "build relaxed, verify strict" asymmetry.
+
+## Lifecycle
+
+```
+issue ──► attenuate ──► attenuate ──► …       verify / verifyChain
+  │           │             │
+ root      child          grandchild           revoke (kills subtree)
+```
+
+### Issue
+
+Mint a root cap: `Parent` is all-zero and the signature verifies against the
+`Issuer`'s registered pubkey. The root cap is the entire trust anchor — there is
+no implicit CA. A verifier must *directly* know the root `Issuer`.
+
+### Attenuate (SPEC §2.2)
+
+Derive a narrower child. The rules are enforced at **mint time** (not only at
+verify time), so a cap that its own verifier would reject is never produced:
+
+- the parent must carry `PermAttenuate` **or** be a `Delegate`-kind cap — else
+  the call is refused (`ErrNotDelegable`);
+- the child's `Issuer` equals the parent's `Holder`, and the signer must hold
+  the parent's holder key;
+- the child's `Permissions` are a **bitwise subset** of the parent's;
+- the child's `Target` equals the parent's — attenuation never broadens scope;
+- `ExpiresAt` may only shrink — the child cannot outlive the parent;
+- `Caveats` are add-only — a child can constrain further, never relax.
+
+### Verify (SPEC §2.3)
+
+The verifier receives `CapProof{Leaf, Chain}` and validates it end to end. The
+chain is passed **nearest-to-leaf first** (`chain[0]` is the leaf's parent,
+`chain[len-1]` is the root). For each cap the verifier checks, in order:
+
+1. not revoked (CapID lookup);
+2. not expired at `now`;
+3. the `Sig` algorithm tag is one it implements (**fail-closed** — see below) and
+   the signature verifies over the signed scope under the `Issuer`'s pubkey;
+4. for a non-root link: the child's `Issuer` equals `hash(parent.Holder)`, the
+   child's `Permissions` are a subset of the parent's, and the parent carries
+   `PermAttenuate` or is a `Delegate` cap (**the delegation gate**, step 3d);
+5. for the root link: `Parent` is all-zero.
+
+It then evaluates the **union** of all chain caveats (AND-composed) and refuses on
+any unsatisfied caveat or any unknown `CaveatKind`. A child cannot strip a
+parent's caveats — the verifier always sees the whole set.
+
+### Revoke (SPEC §4)
+
+The issuer publishes `Revocation{CapID, RevokedAt, RevokerSig}` to an append-only
+log. Verifiers cache revoked CapIDs with a freshness budget and consult them at
+verify step 1. Revoking a cap kills it **and every transitive descendant**,
+because the verifier walks every parent in the chain. Only the original `Issuer`
+may revoke; un-revoke does not exist.
+
+## Fail-closed scheme dispatch
+
+The signature footer is a fixed 3408 bytes; the **algorithm tag** is its final
+byte (`Sig[3407]`). A verifier reads the tag, decodes the leading `L_scheme`
+bytes as the real signature, and ignores the zero pad. The registered schemes:
+
+| Tag | Scheme | Notes |
+| --- | --- | --- |
+| `0x00` | *reserved* | Never valid — a zero-filled / uninitialised footer. Always refused. |
+| `0x01` | secp256k1 ECDSA | 65 bytes (`R‖S‖v`). |
+| `0x02` | Ed25519 | 64 bytes (RFC 8032). The mandatory-to-implement bootstrap scheme. |
+| `0x03` | ML-DSA-65 | 3309 bytes (FIPS 204 Level-3). Mandatory-to-implement for new issuers as of v1.0. |
+| `0x04` | hybrid | Ed25519 ‖ ML-DSA-65 (3373 bytes). |
+
+Dispatch is **fail-closed** (SPEC §2.3 step 3c): a verifier refuses any cap whose
+tag is `0x00`, or any tag outside `{0x01, 0x02, 0x03, 0x04}`, or any *known* tag
+it has no primitive for — it never silently downgrades. Ed25519 (`0x02`) is the
+built-in bootstrap in every runtime; the other schemes are wired by supplying a
+scheme-verify hook (and the matching signer). This is what defeats an algorithm
+downgrade: flipping the tag changes the signed bytes and breaks the signature.
+
+## Per-language status
+
+The capability layer ships in **all four reference runtimes**, each verified
+against the same Go-signed KAT vector.
+
+| Runtime | Package / import | Schemes built in | Schemes via hook |
+| --- | --- | --- | --- |
+| **Go** (reference) | `github.com/zap-proto/go/cap` | Ed25519 | secp256k1, ML-DSA-65, hybrid |
+| **Python** | `zap-proto` → `from zap import cap` | Ed25519, ML-DSA-65, secp256k1¹ | hybrid |
+| **Rust** | `zap-schema` → `zap::cap` | Ed25519, ML-DSA-65 | secp256k1, hybrid |
+| **TypeScript** | `@zap-proto/zap/cap` | Ed25519 | secp256k1, ML-DSA-65, hybrid |
+
+¹ Python's PQ and secp256k1 signers need the `[crypto]` extra; the wire,
+canonical-bytes, and CapID paths are pure stdlib. A missing crypto backend
+raises a fail-closed error — never a fabricated or silently-true verify.
+
+The wire, signed scope, and CapID are byte-identical across all four; only the
+*set of signature primitives a runtime ships built-in* differs. Any runtime can
+**verify** a cap signed under a scheme it has a primitive (or hook) for, and any
+runtime **interoperates at the wire level** with caps it cannot itself verify.
+
+## Examples
+
+Each example mints a root cap, verifies it, then derives a narrower child. The
+signing key in these snippets is the in-runtime Ed25519 signer; production
+deployments wire an ML-DSA-65 or hybrid signer for post-quantum authority.
+
+<Tabs items={["Go", "Python", "Rust", "TypeScript"]}>
+<Tab value="Go">
+```go
+import "github.com/zap-proto/go/cap"
+
+// Mint a root cap. Ed25519Signer is the built-in bootstrap; wire a SchemeVerify
+// hook + matching Signer for ML-DSA-65 / hybrid / secp256k1.
+signer, _ := cap.NewEd25519Signer()
+
+var target, holder [32]byte // 32-byte content hashes of the resource + holder
+root, err := cap.Issue(cap.Issuance{
+	Kind:        uint32(cap.KindIAMSession),
+	Target:      target,
+	Holder:      holder,
+	Permissions: cap.PermAttenuate, // may exercise *and* delegate
+	ExpiresAt:   2_000_000_000,     // unix seconds; 0 = never
+}, signer)
+if err != nil {
+	return err
+}
+
+// Verify a single cap. The Verifier carries the policy: issuer-key resolution,
+// revocation lookup, and (optionally) a PQ signature hook.
+v := cap.Verifier{
+	IssuerKey: func(issuer [32]byte) ([]byte, error) {
+		if issuer == signer.Public() {
+			return signer.PublicKey(), nil
+		}
+		return nil, cap.ErrIssuerUnknown
+	},
+}
+if err := v.Verify(root, 1_700_000_000); err != nil { // now, in unix seconds
+	return err // ErrExpired, ErrRevoked, ErrSigMismatch, ErrUnhandledScheme, …
+}
+
+// Derive a narrower child: permissions intersect, expiry can only shrink, and
+// the parent must carry PermAttenuate (or be a KindDelegate cap).
+var childHolder [32]byte
+child, err := cap.Attenuate(root, childHolder, cap.PermAudit, nil, 0, signer)
+if err != nil {
+	return err
+}
+
+// Validate the full chain: leaf grants op on target to holder, walking parents.
+err = v.VerifyChain(child, []cap.Cap{root}, cap.PermAudit, target, childHolder, 1_700_000_000)
+```
+</Tab>
+<Tab value="Python">
+```python
+from zap import cap
+
+# Mint a root cap. Ed25519Signer is the built-in mandatory scheme; ML-DSA-65 and
+# secp256k1 are also real (with the [crypto] extra).
+signer = cap.Ed25519Signer.generate()
+
+target = bytes(range(32))            # 32-byte content hash of the resource
+holder = bytes(range(31, -1, -1))    # 32-byte content hash of the holder
+root = cap.issue(
+    cap.Issuance(
+        kind=int(cap.CapKind.IAM_SESSION),
+        target=target,
+        holder=holder,
+        permissions=cap.PERM_ATTENUATE,  # may exercise *and* delegate
+        expires_at=2_000_000_000,        # unix seconds; 0 = never
+    ),
+    signer,
+)
+
+# Verify a single cap. The Verifier holds the policy as keyword callbacks.
+issuer = signer.public()
+v = cap.Verifier(
+    issuer_key=lambda h: signer.public_key_bytes() if h == issuer else None,
+)
+v.verify(root, now=1_700_000_000)    # raises ExpiredError / UnhandledSchemeError / … on failure
+
+# Derive a narrower child; the signer must hold the parent's holder key.
+child_holder = bytes(32)
+child = cap.attenuate(root, child_holder, cap.PERM_AUDIT, None, 0, signer)
+
+# Validate the full chain.
+v.verify_chain(child, [root], cap.PERM_AUDIT, target, child_holder, 1_700_000_000)
+```
+</Tab>
+<Tab value="Rust">
+```rust
+use zap::cap::{issue, perm, Issuance, Verifier, Ed25519Signer, CapKind};
+
+// Mint a root cap. Ed25519Signer is the built-in bootstrap; ML-DSA-65 is also
+// provided, and a scheme-verify hook wires hybrid / secp256k1.
+let signer = Ed25519Signer::generate();
+
+let root = issue(
+    Issuance {
+        kind: CapKind::IamSession.value(),
+        target,                          // [u8; 32] resource hash
+        holder,                          // [u8; 32] holder hash
+        permissions: perm::ATTENUATE,    // may exercise *and* delegate
+        expires_at: 2_000_000_000,       // unix seconds; 0 = never
+        ..Default::default()
+    },
+    &signer,
+)?;
+
+// Verify a single cap. The Verifier carries the policy as builder closures.
+let verifier = Verifier::new()
+    .with_issuer_key(move |_issuer| Ok(signer.public_key().to_vec()));
+verifier.verify(&root, 1_700_000_000)?;  // Err(CapError::Expired / UnhandledScheme / …)
+
+// Derive a narrower child; attenuate is a method on the parent Capability.
+let child = root.attenuate(child_holder, perm::AUDIT, vec![], 0, &signer)?;
+
+// Validate the full chain (chain, target, and holder are passed by reference).
+verifier.verify_chain(&child, &[root], perm::AUDIT, &target, &child_holder, 1_700_000_000)?;
+```
+</Tab>
+<Tab value="TypeScript">
+```typescript
+import { issue, attenuate, Verifier, Ed25519Signer, CapKind, Perm } from '@zap-proto/zap/cap';
+
+// Mint a root cap. Ed25519Signer is the built-in bootstrap (node:crypto); wire a
+// schemeVerify hook for ML-DSA-65 / hybrid / secp256k1 (JS ships no PQ primitive).
+const signer = Ed25519Signer.generate();
+
+const target = new Uint8Array(32).fill(7);  // 32-byte content hash of the resource
+const holder = new Uint8Array(32).fill(9);  // 32-byte content hash of the holder
+const root = issue(
+  {
+    kind: CapKind.IAMSession,
+    target,
+    holder,
+    permissions: Perm.Attenuate,   // may exercise *and* delegate
+    expiresAt: 2_000_000_000n,     // unix seconds; 0 = never
+  },
+  signer,
+);
+
+// Verify a single cap. verify/verifyChain return CapError | null (null = ok);
+// issue/attenuate/revoke throw on refusal.
+const issuer = signer.public();
+const sameHash = (a: Uint8Array, b: Uint8Array) =>
+  a.length === b.length && a.every((x, i) => x === b[i]);
+const v = new Verifier({
+  issuerKey: (h) => (sameHash(h, issuer) ? signer.publicKey() : null),
+});
+const err = v.verify(root, 1_700_000_000n);  // null, or a CapError with err.code
+if (err) throw err;
+
+// Derive a narrower child; the signer must hold the parent's holder key.
+const childHolder = new Uint8Array(32);
+const child = attenuate(root, childHolder, Perm.Audit, undefined, 0n, signer);
+
+// Validate the full chain.
+const chainErr = v.verifyChain(child, [root], Perm.Audit, target, childHolder, 1_700_000_000n);
+```
+</Tab>
+</Tabs>
+
+> **API shape across runtimes.** Go and Python expose `issue`/`attenuate` as free
+> functions; Rust's `issue` is a free function but `attenuate` is a method on
+> `Capability`. Go and Python construct the `Verifier` as a struct/keyword object;
+> Rust uses a builder (`Verifier::new().with_issuer_key(…)`); TypeScript passes a
+> `VerifierOptions` object. Go and Rust raise/return errors; Python raises;
+> TypeScript returns `CapError | null` from verification and throws from minting.
+
+## Threat model at a glance
+
+| Threat | Mitigation |
+| --- | --- |
+| Replay of an intercepted cap | `NonceHash` caveat binds the cap to a one-time server nonce; an out-of-band holder signature over a per-session nonce binds use to the live keypair. |
+| Stolen cap bytes | `Holder` binds to a pubkey — the attacker must also hold the private key. |
+| Permission escalation by a child | Verify step 3d rejects any cap with bits not in the parent's `Permissions`. |
+| Caveat stripping by a child | The verifier evaluates the **union** of caveats across the whole chain. |
+| Algorithm downgrade | The verifier refuses unknown tags and reserved `0x00`; the tag is inside the signed bytes. |
+| Issuer compromise | Damage is bounded by the issuer's level in the chain; revoking the subtree contains it. |
+
+## Next Steps
+
+<Cards>
+  <Card title="Capability Spec" href="https://github.com/zap-proto/zap-spec/blob/main/SPEC.md">
+    SPEC.md §2.3 / §3 / §4 — the verify algorithm, signed scope, and revocation rules
+  </Card>
+  <Card title="RPC System" href="/docs/rpc">
+    Attach a cap to a call and pipeline on its result
+  </Card>
+  <Card title="Capability Mailbox" href="/docs/examples/capability-mailbox">
+    A worked example: an attenuated mailbox cap end to end
+  </Card>
+  <Card title="Post-Quantum" href="/docs/post-quantum">
+    The ML-DSA-65 / hybrid signers behind PQ-grade caps
+  </Card>
+</Cards>

@@ -1,0 +1,217 @@
+---
+title: Schema Language
+description: The ZAP schema language — whitespace-significant, brace-free, with optional explicit ordinals.
+---
+
+# Schema Language
+
+A ZAP schema describes your data structures and service interfaces in a single
+`.zap` file. Its defining feature is that it is **whitespace-significant**:
+blocks are delimited by indentation — the offside rule — so there are no braces
+and no semicolons. Field ordinals are assigned automatically, so you don't write
+`@N` by hand either.
+
+This page is the reference for that syntax. Every example shows the ZAP form
+alongside the equivalent legacy Cap'n Proto form — ZAP's compiler still parses
+the brace form for backward compatibility, and the two produce byte-identical
+schemas.
+
+## The offside rule
+
+Indentation defines structure. A `struct` or `interface` opens a block; the
+members are the lines indented under it. Dedenting closes the block. There is no
+file ID and no `@N` ordinal in the common case:
+
+<SchemaTabs
+  filename="point.zap"
+  zap={`struct Point
+  x Float32
+  y Float32`}
+  capnp={`@0x986b3393db1396c9;  # file ID required
+
+struct Point {
+  x @0 :Float32;
+  y @1 :Float32;
+}`}
+/>
+
+A field is `name Type`. Ordinals (`@0`, `@1`, …) are implied by declaration
+order — the first field is `@0`, the next `@1`, and so on.
+
+## Why ordinals matter — and stay implicit
+
+Ordinals are the basis of forward and backward compatibility: a reader locates a
+field by its ordinal, not its name or position, so renaming a field or adding a
+new one never breaks an existing peer. Because ordinals follow declaration order,
+the rule for safe evolution is simple: **only ever append fields**. Appending a
+field gives it the next ordinal and leaves every existing field's ordinal
+unchanged.
+
+If you need to insert or reorder fields in the source while preserving wire
+compatibility, pin the ordinal explicitly with `@N`. This is the one case where
+you write an ordinal by hand:
+
+<SchemaTabs
+  filename="person.zap"
+  zap={`struct Person
+  name Text
+  email @3 Text     # pinned: keep ordinal 3 even though it appears 2nd
+  birthdate Date     # implicit ordinal 1
+  phones List(PhoneNumber)`}
+  capnp={`@0xa1b2c3d4e5f6a7b8;
+
+struct Person {
+  name @0 :Text;
+  email @3 :Text;
+  birthdate @1 :Date;
+  phones @2 :List(PhoneNumber);
+}`}
+/>
+
+Within a block, implicit ordinals fill the gaps left by pinned ones in
+ascending order. Mixing implicit and pinned ordinals is exactly how you migrate
+a legacy brace schema field-by-field without a wire break.
+
+## Scalar types
+
+| Category | Types |
+| --- | --- |
+| Boolean | `Bool` |
+| Signed integers | `Int8` `Int16` `Int32` `Int64` |
+| Unsigned integers | `UInt8` `UInt16` `UInt32` `UInt64` |
+| Floating point | `Float32` `Float64` |
+| Bytes / text | `Data` `Text` |
+| Other | `Void` `Date` |
+
+## Lists
+
+`List(T)` is a homogeneous, variable-length sequence. Elements may be scalars,
+structs, or nested lists:
+
+<SchemaTabs
+  zap={`struct Matrix
+  rows List(List(Float64))
+
+struct Roster
+  members List(Person)
+  tags List(Text)`}
+  capnp={`struct Matrix {
+  rows @0 :List(List(Float64));
+}
+
+struct Roster {
+  members @0 :List(Person);
+  tags @1 :List(Text);
+}`}
+/>
+
+## Enums
+
+An `enum` is a closed set of named values. As with struct fields, the values'
+ordinals follow declaration order:
+
+<SchemaTabs
+  zap={`enum Color
+  red
+  green
+  blue`}
+  capnp={`enum Color {
+  red @0;
+  green @1;
+  blue @2;
+}`}
+/>
+
+## Unions
+
+A `union` holds exactly one of its variants at a time — a tagged sum type. It is
+declared as an indented block inside a struct:
+
+<SchemaTabs
+  zap={`struct Shape
+  union
+    circle Circle
+    rectangle Rectangle
+    empty Void`}
+  capnp={`struct Shape {
+  union {
+    circle @0 :Circle;
+    rectangle @1 :Rectangle;
+    empty @2 :Void;
+  }
+}`}
+/>
+
+## Interfaces
+
+An `interface` declares callable methods. A method is
+`name (params) -> (results)`; both parameter and result lists are
+comma-separated `name Type` pairs. Methods, like fields, get implicit ordinals
+in declaration order — appending a method never renumbers the existing ones:
+
+<SchemaTabs
+  filename="addressbook.zap"
+  zap={`interface AddressBook
+  lookup (id UInt64) -> (person Person)
+  insert (person Person) -> (id UInt64)
+  search (query Text) -> stream (person Person)`}
+  capnp={`interface AddressBook {
+  lookup @0 (id :UInt64) -> (person :Person);
+  insert @1 (person :Person) -> (id :UInt64);
+  search @2 (query :Text) -> stream (person :Person);
+}`}
+/>
+
+A result list of `stream (...)` makes the method return a stream of results
+rather than a single one.
+
+## Comments
+
+`#` begins a comment that runs to end of line. Comments are valid anywhere
+whitespace is — most usefully to record *why* a field exists, since the field's
+position no longer encodes that:
+
+```zap
+struct Person
+  name Text
+  birthdate Date   # added in v1
+  email Text       # added in v2 — readers older than v2 simply skip it
+```
+
+## Imports
+
+`using import` pulls types from another schema file into the current namespace:
+
+```zap
+using import "common.zap"
+
+struct Order
+  customer Person     # defined in common.zap
+  total Money
+```
+
+## Whitespace, formally
+
+- **Blocks are indentation-delimited.** Indent to open a block under `struct`,
+  `interface`, `enum`, or `union`; dedent to close it. Be consistent within a
+  file — pick spaces or tabs and keep the step uniform.
+- **One declaration per line.** A field, method, enum value, or union variant is
+  a single line.
+- **No braces, no semicolons, no file ID.** The compiler's `desugar` pass lowers
+  the indented form to the core grammar before any other stage runs.
+- **Brace form still parses.** Existing `.capnp`-style schemas compile unchanged;
+  desugaring is a no-op on them, so a mixed migration is byte-safe.
+
+## Next Steps
+
+<Cards>
+  <Card title="Code Generation" href="/docs/codegen">
+    Turn a .zap schema into typed code for your language
+  </Card>
+  <Card title="RPC System" href="/docs/rpc">
+    Build services from your interface declarations
+  </Card>
+  <Card title="Quick Start" href="/docs/quick-start">
+    Write and run your first schema end-to-end
+  </Card>
+</Cards>

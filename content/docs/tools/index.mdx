@@ -1,0 +1,50 @@
+---
+title: Overview
+description: The ZAP toolchain — code generation, the protobuf-migration codemod, and the one sanctioned protobuf boundary.
+---
+
+# Tools
+
+Three tools cover the full path from a protobuf + gRPC codebase to a ZAP-native one. Each does one job. Together they are the complete pb↔ZAP interop boundary — there is nothing else to install and no fourth place where the two worlds touch.
+
+| Tool | Direction | What it does |
+|---|---|---|
+| [Code generation](/docs/codegen) | `.zap` → code | Compiles a schema to zero-copy Views/Builders and typed clients/servers |
+| [`pb2zap`](/docs/tools/pb2zap) | pb Go code → ZAP Go code | `go/ast` codemod that rewrites protobuf construction sites to ZAP wire constructors |
+| [`zap2pb`](/docs/tools/zap2pb) | message → pb wire bytes | The single sanctioned place protobuf is imported — four functions at the interop edge |
+
+## One schema, one wire contract
+
+Everything starts from a `.zap` file. It is the one wire contract for a service — structs for the payloads, an interface for the RPC surface, stable opcodes for evolution. A production example, from [hanzoai/tasks](https://github.com/hanzoai/tasks) (`schema/tasks.zap`):
+
+```zap
+# Opcodes are stable across releases. Adding a new RPC appends a
+# new opcode; never reuse.
+
+struct WorkflowExecution
+  workflowId Text
+  runId Text
+
+struct TaskQueue
+  name Text
+  kind Int8   # 0=normal, 1=sticky
+
+interface Tasks
+  startWorkflow (req StartWorkflowRequest)
+    -> (resp StartWorkflowResponse)
+  signalWorkflow (req SignalWorkflowRequest)
+    -> (ok Bool)
+```
+
+No file IDs, no hand-written ordinals — field order is wire order, and backward compatibility comes from appending. The [Schema Language](/docs/schema) page is the syntax reference; [Code Generation](/docs/codegen) covers the front-end and every language backend (`zapgen` for Go/TS, the `zapc` binary for Rust, `zap generate` for the rest).
+
+## Migrating off protobuf + gRPC
+
+The migration is mechanical at the edges and honest about the middle:
+
+1. **Port the schema.** `.proto` messages become `.zap` structs; each service method gets a stable opcode. This step is a hand-port by design — the schema is your wire contract, and it deserves review, not transliteration.
+2. **Generate.** [Code generation](/docs/codegen) gives you the typed surface in every language you ship.
+3. **Rewrite call sites.** [`pb2zap`](/docs/tools/pb2zap) rewrites every unambiguous protobuf construction site (`&pb.Msg{...}` → `wire.NewMsg(wire.MsgInput{...})`) across the tree and *reports* the reads and writes it leaves for a human — it never guesses.
+4. **Fence the last edge.** If an external system still speaks protobuf on the wire (OTLP is the usual one), that traffic goes through [`zap2pb`](/docs/tools/zap2pb) — and only through it. One import of `google.golang.org/protobuf` per stack.
+
+The end state is real, not aspirational: the Hanzo production stack runs ZAP-native with zero gRPC and a single four-function protobuf boundary. The full account is in [Why ZAP](/docs/why-zap#zap-only-in-production).

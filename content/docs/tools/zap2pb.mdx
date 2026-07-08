@@ -1,0 +1,58 @@
+---
+title: zap2pb
+description: The sanctioned ZAP↔protobuf wire boundary — one file, four functions, the only place protobuf is imported.
+---
+
+# zap2pb
+
+[`zap2pb`](https://github.com/zap-proto/zap2pb) is the other edge of [pb2zap](/docs/tools/pb2zap): where pb2zap moves your *code* off protobuf, zap2pb is the one place a ZAP-native stack still *touches* protobuf — because some external system on the other end of a socket demands it.
+
+It is deliberately tiny: one file, four functions, wrapping `google.golang.org/protobuf`. That is the point. The package exists as **policy, not convenience** — it is the single sanctioned import of protobuf in the stack, so "who still links protobuf?" has a one-word answer.
+
+```bash
+go get github.com/zap-proto/zap2pb@v0.2.0
+```
+
+## API
+
+```go
+// Marshal encodes m to protobuf wire bytes.
+func Marshal(m proto.Message) ([]byte, error)
+
+// Unmarshal decodes protobuf wire bytes into m.
+func Unmarshal(b []byte, m proto.Message) error
+
+// Equal reports whether a and b are semantically equal messages.
+func Equal(a, b proto.Message) bool
+
+// AppendMessage marshals m and appends it to dst as length-delimited
+// field num; repeated calls with one num build a `repeated` field,
+// byte-identical to marshaling the enclosing message.
+func AppendMessage(dst []byte, num int, m proto.Message) ([]byte, error)
+```
+
+That is the entire surface. If your interop edge needs more than this, the edge is too wide.
+
+## Why `AppendMessage` exists
+
+The subtle function is `AppendMessage`, and it exists for a dependency-hygiene reason. Generated protobuf packages for RPC services ship their gRPC service stubs in the same package, with no build tag — importing the generated *request* type drags `google.golang.org/grpc` into your module graph. `AppendMessage` lets you hand-build the enclosing request envelope from its grpc-free field messages instead, byte-identical to marshaling the generated type, without ever importing it.
+
+## The OTLP edge, concretely
+
+Observability is the edge where this matters in practice. OpenTelemetry's OTLP (and OpAMP) wire is protobuf; that is the industry contract and not worth fighting. The ZAP-native answer:
+
+- Spans are marshaled as standard OTLP protobuf **messages** — through this package.
+- The bytes ship over the **ZAP wire** (zero-copy frames, X-Wing PQ-KEM handshake) to the collector's ZAP receiver — never OTLP-over-HTTP (`:4318`) or OTLP-over-gRPC (`:4317`).
+- The `ExportTraceServiceRequest` envelope is built with `AppendMessage` from the grpc-free trace messages, so no gRPC enters the module graph.
+
+The result: OTLP-compatible telemetry, zero gRPC, and protobuf confined to one four-function file. This is the boundary that lets the [ZAP-only production stack](/docs/why-zap#zap-only-in-production) claim *zero protobuf in application code* and mean it.
+
+## The rule
+
+Exactly one import of `google.golang.org/protobuf` per stack — this one. A second import site is a regression, not a style choice: it un-answers the question the package exists to answer.
+
+## Related
+
+- [Tools overview](/docs/tools) — the full pb↔ZAP migration path
+- [pb2zap](/docs/tools/pb2zap) — the codemod that gets your code off protobuf in the first place
+- [Why ZAP](/docs/why-zap) — what a stack looks like when this boundary is all that is left

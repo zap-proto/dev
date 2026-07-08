@@ -27,13 +27,16 @@ Services using [`zap-proto/http`](https://github.com/zap-proto/http) — the `ne
 |---|---|---|
 | **Hanzo Gateway** | [hanzoai/gateway](https://github.com/hanzoai/gateway) | API gateway terminating user HTTP, proxying upstream over ZAP-HTTP |
 | **Hanzo Ingress** | [hanzoai/ingress](https://github.com/hanzoai/ingress) | L7 reverse proxy, serves ZAP-HTTP on the cluster-internal hop |
-| **Hanzo Cloud** | [hanzoai/cloud](https://github.com/hanzoai/cloud) | Internal cloud control plane |
+| **Hanzo Cloud** | [hanzoai/cloud](https://github.com/hanzoai/cloud) | Unified control plane — one binary, 15+ subsystems on a sub-1,000-line [zip](/docs/zip) compose root, zero gRPC/protobuf in app code |
 | **Lux ZAP** | [luxfi/zap](https://github.com/luxfi/zap) | Lux-network reference integration |
 
 ## Libraries & tooling
 
 | Project | Repo | Description |
 |---|---|---|
+| **zip** | [zap-proto/zip](https://github.com/zap-proto/zip) | [ZAP-native application server](/docs/zip) — Fiber v3/fasthttp core, ZAP primary + HTTP secondary, one Listen verb |
+| **pb2zap** | [zap-proto/pb2zap](https://github.com/zap-proto/pb2zap) | [`go/ast` codemod](/docs/tools/pb2zap) migrating protobuf construction sites to ZAP wire constructors |
+| **zap2pb** | [zap-proto/zap2pb](https://github.com/zap-proto/zap2pb) | [The sanctioned ZAP↔protobuf wire boundary](/docs/tools/zap2pb) — one file, four functions |
 | **Hanzo zap-es** | [hanzoai/zap-es](https://github.com/hanzoai/zap-es) (mirror of [zap-proto/zap-es](https://github.com/zap-proto/zap-es)) | Cap'n-Proto-style wire encoder for TypeScript |
 | **Hanzo Marketing** | [hanzoai/marketing](https://github.com/hanzoai/marketing) | Static-site build pipeline (uses ZAP-HTTP for the rebuild trigger hook) |
 
@@ -68,4 +71,5 @@ These deployments share their numbers on the [benchmarks page](/docs/benchmarks)
 
 - [SDKs](/docs/sdks) — pick your language and start shipping
 - [Protocols](/docs/protocols) — native ZAP vs. carrier protocols
+- [Tools](/docs/tools) — codegen and the protobuf migration path
 - [Benchmarks](/docs/benchmarks) — apples-to-apples vs. classical alternatives

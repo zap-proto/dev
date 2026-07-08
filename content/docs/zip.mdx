@@ -1,0 +1,89 @@
+---
+title: zip
+description: The ZAP-native application server — one app, one Listen verb, ZAP primary and HTTP secondary.
+---
+
+# zip
+
+[`zap-proto/zip`](https://github.com/zap-proto/zip) is the application server of the ZAP stack: a Go framework with a Fiber v3 / fasthttp core, a Sinatra-style routing API, and **ZAP as the primary transport**. HTTP is not the product — it is a secondary view of the same routes, served through an adapter when you ask for it.
+
+```go
+package main
+
+import (
+    "github.com/zap-proto/zip"
+    "github.com/zap-proto/zip/middleware"
+)
+
+func main() {
+    app := zip.New(zip.Config{})
+    app.Use(middleware.Recover(), middleware.RequestID())
+
+    app.Get("/health", func(c *zip.Ctx) error {
+        return c.JSON(200, map[string]string{"status": "ok"})
+    })
+
+    _ = app.Listen(":9653", "http://:8080") // ZAP primary + HTTP extra, one verb
+}
+```
+
+```bash
+go get github.com/zap-proto/zip
+```
+
+## Transport is a value, not a method
+
+There is one verb, `app.Listen(addrs...)`, and the address scheme selects the transport — mirroring `net.Listen(network, addr)`:
+
+```go
+app.Listen(":9653")                   // ZAP (bare addr = the primary)
+app.Listen(":9653", "http://:8080")   // ZAP + HTTP in one call
+app.Listen("http://:8080")            // HTTP only
+app.Listen("quic://:443")             // any RegisterTransport'd protocol
+```
+
+ZAP (TLS 1.3 + [post-quantum KEM](/docs/post-quantum)) is the default; HTTP is built in; `zip.RegisterTransport(scheme, fn)` slots in any future protocol with zero change to the Listen API. Your routes *are* the surface — the same handlers, middleware, and auth run over every transport you listen on.
+
+## One registry, three projections
+
+Typed handlers are where zip earns its keep. `zip.Get[In, Out](app, path, fn)` registers one operation, and that single registration projects three ways:
+
+1. **REST route** — the handler itself.
+2. **OpenAPI 3.1** — generated from `In`/`Out`, served with Swagger UI at `/docs`.
+3. **MCP tool** — every typed handler is automatically a [Model Context Protocol](/docs/protocols/mcp) tool at `/mcp` (JSON-RPC 2.0): `tools/list` projects the same JSON Schema the OpenAPI doc uses, `tools/call` runs the exact same `fn`.
+
+Because `/mcp` is an ordinary route, it is served over every transport you `Listen` on — so **ZAP-native MCP is automatic**: an agent speaking ZAP gets the full tool surface with zero wiring. On by default; `Config.MCP.Disabled` suppresses it.
+
+For a gRPC-style named-service surface on top, `zaprpc.Registry` + `zaprpc.HTTPHandler(reg)` exposes generated `zapc` services by name at a route.
+
+## Composition: services are Mounts
+
+Services built on zip compose over `zip.App` with one contract:
+
+```go
+func Mount(app *zip.App, deps Deps) error
+```
+
+Each subsystem is a package exposing `Mount`; a binary is a *selection* of subsystems mounted into one app. Migration is the same shape — `app.Mount("/legacy", chiRouter)` accepts any `http.Handler` (chi, gin, beego, `net/http`), so an existing service becomes a subsystem before it becomes ZAP-native.
+
+### In production: one binary, 76:1
+
+The proof this scales is [hanzoai/cloud](https://github.com/hanzoai/cloud), the unified Hanzo control plane. Its compose root — subsystem registry, typed dependency bag, serve loop, subcommand dispatch — is **under 1,000 lines** of zip. Those lines host **~75,000 lines** of subsystem code (IAM, KMS, gateway, commerce, AI, and a dozen more), each mounted through the same `MountSpec{Name, Order, Mount}` registration. Roughly 76 lines of product for every line of framework shim.
+
+The same artifact is every standalone service *and* the fused control plane: `hanzo iam` serves one subsystem, `hanzo cloud` mounts them all — identical compose root, one listener, ZAP primary. The full stack story is in [Why ZAP](/docs/why-zap#zap-only-in-production).
+
+## Everything else in the box
+
+- **Identity built-in** — `c.Org()` / `c.User()` / `c.UserEmail()` read gateway-minted, JWT-validated identity headers; handlers never parse tokens.
+- **WebSocket** — `wsx.Upgrade(fn)` via fasthttp/websocket.
+- **SSE / streaming** — `c.SendStreamWriter`, and streaming over the ZAP transport through the framework (zap-proto/http v0.2.0).
+- **Extension routes** — `app.Module("POST /v1/eval", "wasm", "./policy")` mounts a sandboxed extension (wasm, goja, starlark, native) as a route.
+- **Embedded JS/TS runtime** — `runtime.JSHandler` runs an Express-shaped JS function in-process via goja (pure Go, no CGO); TS is transpiled with esbuild.
+- **Stdlib JSON only** — every JSON path goes through one internal helper backed by `encoding/json/v2` where available; no third-party JSON library.
+
+## Related
+
+- [Tools](/docs/tools) — generate the typed services zip serves
+- [HTTP over ZAP](/docs/protocols/http) — the transport zip's HTTP adapter and ZAP primary share
+- [Gateway](/docs/gateway) — the edge in front of a zip fleet
+- [Ecosystem](/docs/ecosystem) — who runs zip in production

@@ -1,0 +1,103 @@
+---
+title: fiber
+description: A fork of gofiber/fiber v3 that adds specificity-based route precedence natively in the router — ServeMux-1.22 semantics, so the most specific pattern wins regardless of registration order.
+---
+
+# fiber
+
+[`zap-proto/fiber`](https://github.com/zap-proto/fiber) is a fork of [gofiber/fiber](https://github.com/gofiber/fiber) v3. It changes exactly one thing: **route precedence is a property of the pattern, not of registration order.** Everything else is upstream Fiber v3, unchanged.
+
+It is a drop-in replacement — the module path is `github.com/zap-proto/fiber/v3` and the public API is that of gofiber v3.2.0. [zip](/docs/zip) is its intended consumer, but the fork stands alone and works anywhere gofiber v3 does.
+
+```bash
+go get github.com/zap-proto/fiber/v3
+```
+
+## What upstream does, and why it bites
+
+Upstream Fiber matches routes in **registration order**: the first route on the per-method stack that matches an incoming path wins. That makes precedence depend on *when* a route was registered rather than *how specific* it is. So this silently shadows the static handler:
+
+```go
+app.Get("/v1/iam/*",    listAll)   // registered first — matches everything
+app.Get("/v1/iam/keys", getKeys)   // registered second — never reached
+```
+
+`GET /v1/iam/keys` hits `listAll`, because the wildcard was registered first. The only fix upstream is to hand-order every registration, which couples correctness to import order and route-registration sequence across a whole codebase.
+
+## What the fork changes
+
+The fork keeps Fiber's stack model but maintains the per-method stack in **most-specific-first** order via sorted insertion. Because Fiber's tree buckets preserve the relative order of the stack as sub-sequences, and the matcher returns the first matching route in a bucket, ordering the stack by specificity is sufficient to make the most specific pattern win for every registration order — startup or runtime-added — **with no changes to the matcher or the tree builder**.
+
+The comparator mirrors Go 1.22 `net/http.ServeMux` precedence:
+
+| Rule | More specific |
+|---|---|
+| Segment kind | static literal ≻ `:param` ≻ `*` / `+` wildcard |
+| Static structure | more static/param segments than a shorter wildcard pattern |
+| Static tie-break | the longer literal (constrains more of the path) |
+| Determinism | equal-length literals ordered lexicographically |
+
+```go
+// Registration order no longer matters — the static route always wins.
+app.Get("/v1/iam/*",    listAll)
+app.Get("/v1/iam/keys", getKeys)
+// GET /v1/iam/keys          -> getKeys
+// GET /v1/iam/anything-else -> listAll
+
+// The full ladder: static ≻ param ≻ wildcard.
+app.Get("/users/*",   wildcard)
+app.Get("/users/:id", param)
+app.Get("/users/me",  static)
+// /users/me -> static   /users/42 -> param   /users/a/b -> wildcard
+
+// A deeper static route beats a shallower wildcard.
+app.Get("/a/*",     wildcard)
+app.Get("/a/b/c",   deepStatic)
+// /a/b/c -> deepStatic   /a/x -> wildcard
+```
+
+### Conflicts panic at startup
+
+Two **distinct** patterns of equal specificity overlap with no winner — one would silently shadow the other after sorting. Instead of guessing, the fork **panics at registration, naming both patterns**, exactly as ServeMux rejects two patterns when neither is more specific:
+
+```go
+app.Get("/x/:id",   h1)
+app.Get("/x/:name", h2)
+// panic: fiber: route conflict: GET /x/:name conflicts with GET /x/:id
+//        (equal specificity, ambiguous match)
+```
+
+Three cases are deliberately **not** conflicts:
+
+- **Same pattern re-registered** — keeps Fiber's documented handler merge: both handler sets run in order, so it never shadows (this is how `app.All` after a specific method chains handlers).
+- **Different methods** — method stacks are independent, so `GET /y/:id` and `POST /y/:id` coexist.
+- **Constraint-disambiguated params** — `:id<int>` and `:slug` at the same position match disjoint value sets, so they are exempt from the panic and keep registration order, matching upstream Fiber's constraint routing.
+
+### Middleware and mount barriers
+
+Middleware (`Use`) and mounted sub-apps are **precedence barriers**. Their relative order is meaningful, so an endpoint is never reordered across one — sorted insertion is bounded to the run of endpoints that follows the last barrier. This keeps middleware-before-handler semantics exact: middleware always wraps the handlers declared after it, while endpoints within a middleware context sort by specificity.
+
+Auto-generated routes (auto-`HEAD` mirrors, mounted sub-apps) are exempt from both the merge and the conflict checks — they are not user registrations. Routes added at runtime land in their correct precedence position after `RebuildTree`, not merely at the end.
+
+## Why do this in the router
+
+Precedence *should* be a property of the pattern. When it is a property of registration order, every refactor that moves a route, every change in import order, and every new wildcard is a latent shadowing bug that passes tests and fails in production. Pushing the rule into the router — the one place that already owns matching — means services never hand-order routes and never carry a lint rule for it. The semantics are the ones Go's own standard library adopted in 1.22, so they are already familiar and already specified.
+
+## Compatibility
+
+- **Drop-in for gofiber v3.2.0.** Same package name (`fiber`), same public API, same `fiber.Ctx`, `fiber.Handler`, `fiber.Config`, middleware packages, and behavior. Only the internal stack ordering and the startup conflict check are added.
+- **Module path:** `github.com/zap-proto/fiber/v3`. Import it in place of `github.com/gofiber/fiber/v3`; released on semver tags tracking upstream (fork tagged `v3.2.1`).
+- **The one behavior change to know:** a codebase that *relied* on registration-order shadowing, or that registered two genuinely ambiguous unconstrained patterns, will now get correct precedence or a loud startup panic respectively. Both are the intended outcome.
+
+## Consumers
+
+[zip](/docs/zip) builds directly on this fork and re-exports the contract; its `specificity_test.go` pins the same cases from the framework surface. Any gofiber v3 application can adopt the fork by swapping the import path.
+
+## License and attribution
+
+MIT — the upstream gofiber license is carried forward unchanged (Copyright © 2019-present Fenny and Contributors). The fork adds `router_precedence.go` and its tests; see [`zap-proto/fiber`](https://github.com/zap-proto/fiber) for the full diff.
+
+## Related
+
+- [zip](/docs/zip) — the ZAP-native web framework built on this fork
+- [Transports](/docs/transports) — the ZAP wire zip serves routes over

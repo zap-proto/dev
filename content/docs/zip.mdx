@@ -1,11 +1,13 @@
 ---
 title: zip
-description: The ZAP-native application server — one app, one Listen verb, ZAP primary and HTTP secondary.
+description: The ZAP-native web framework for Go — one app, one Listen verb, ZAP primary and HTTP extra, with OpenAPI and MCP projected from the same routes.
 ---
 
 # zip
 
-[`zap-proto/zip`](https://github.com/zap-proto/zip) is the application server of the ZAP stack: a Go framework with a Fiber v3 / fasthttp core, a Sinatra-style routing API, and **ZAP as the primary transport**. HTTP is not the product — it is a secondary view of the same routes, served through an adapter when you ask for it.
+[`zap-proto/zip`](https://github.com/zap-proto/zip) is the web framework of the ZAP stack: a Go framework with a [Fiber v3](/docs/fiber) / fasthttp core, a Sinatra-style routing API, and **ZAP as the primary transport**. HTTP is not the product — it is a secondary view of the same routes, served through an adapter when you ask for it.
+
+One framework for every Go binary. Routes are defined once and served over every transport you listen on, and typed routes project for free into an OpenAPI document and an [MCP](/docs/protocols/mcp) tool surface.
 
 ```go
 package main
@@ -42,48 +44,164 @@ app.Listen("http://:8080")            // HTTP only
 app.Listen("quic://:443")             // any RegisterTransport'd protocol
 ```
 
-ZAP (TLS 1.3 + [post-quantum KEM](/docs/post-quantum)) is the default; HTTP is built in; `zip.RegisterTransport(scheme, fn)` slots in any future protocol with zero change to the Listen API. Your routes *are* the surface — the same handlers, middleware, and auth run over every transport you listen on.
+ZAP (TLS 1.3 + [post-quantum KEM](/docs/post-quantum)) is the default: a bare address with no `scheme://` uses it. HTTP is built in. `zip.RegisterTransport(scheme, fn)` slots in any future termination/serialization protocol with zero change to the `Listen` API — the one extension point. Every address is served concurrently from a single call; `Listen` blocks until a listener stops or the first one errors.
+
+Your routes *are* the surface — the same handlers, middleware, auth, and error handling run over every transport. There are no per-transport methods and no second router.
+
+## Handlers and Ctx
+
+A handler is `func(c *zip.Ctx) error`. `zip.Ctx` wraps the underlying `fiber.Ctx` and adds request/response sugar and identity accessors. Returning a `*zip.HTTPError` sets the response status; any other error becomes a `500` JSON body through the default error handler.
+
+```go
+app.Get("/v1/users/:id", func(c *zip.Ctx) error {
+    id := c.Param("id")
+    if id == "" {
+        return zip.ErrBadRequest("missing id")
+    }
+    return c.JSON(200, map[string]string{
+        "id":   id,
+        "org":  c.Org(),  // gateway-minted X-Org-Id
+        "user": c.User(), // gateway-minted X-User-Id
+    })
+})
+```
+
+| Group | Methods |
+|---|---|
+| Request | `Method()` · `Path()` · `Param(name)` · `Query(name)` · `Header(name)` · `Body()` |
+| Bind + validate | `Bind(v)` · `BindQuery(v)` · `BindURI(v)` — parse by content type, then run `required` / `min` / `max` / `minlen` / `maxlen` struct-tag validation, returning `400` on failure |
+| Response | `Status(code)` · `JSON(code, v)` · `String(code, s)` · `Bytes(code, b)` · `NoContent(code)` |
+| Stream | `SendStream(r)` · `SendStreamWriter(fn)` — chunked / Server-Sent Events |
+| Identity | `Org()` · `User()` · `UserEmail()` · `IsAdmin()` · `RequestID()` — read JWT-validated `X-*` headers set by the gateway; empty when no gateway is in front (local dev) |
+| Escape | `Fiber()` · `App()` · `Context()` · `Log()` · `Locals(k, v...)` |
+
+Errors are values: `zip.Errorf(status, format, args...)` and the shortcuts `ErrBadRequest` / `ErrUnauthorized` / `ErrForbidden` / `ErrNotFound` / `ErrConflict` / `ErrInternal` all build a `*zip.HTTPError` that the framework renders as `{status, code, error}` JSON.
 
 ## One registry, three projections
 
-Typed handlers are where zip earns its keep. `zip.Get[In, Out](app, path, fn)` registers one operation, and that single registration projects three ways:
+Typed handlers are where zip earns its keep. `zip.Get[In, Out](app, path, fn)` registers one operation, and that single registration projects three ways from one internal `registeredOp`:
 
-1. **REST route** — the handler itself.
-2. **OpenAPI 3.1** — generated from `In`/`Out`, served with Swagger UI at `/docs`.
-3. **MCP tool** — every typed handler is automatically a [Model Context Protocol](/docs/protocols/mcp) tool at `/mcp` (JSON-RPC 2.0): `tools/list` projects the same JSON Schema the OpenAPI doc uses, `tools/call` runs the exact same `fn`.
+1. **REST route** — the handler itself: decode body → `In`, validate, run `fn`, marshal `Out` → JSON.
+2. **OpenAPI 3.1** — generated from the `In`/`Out` types, served at `/.well-known/openapi.json` with Swagger UI at `/docs`.
+3. **MCP tool** — every typed handler is automatically a [Model Context Protocol](/docs/protocols/mcp) tool at `/mcp` (JSON-RPC 2.0). `tools/list` projects the same JSON Schema the OpenAPI doc uses; `tools/call` runs the exact same `fn`.
 
-Because `/mcp` is an ordinary route, it is served over every transport you `Listen` on — so **ZAP-native MCP is automatic**: an agent speaking ZAP gets the full tool surface with zero wiring. On by default; `Config.MCP.Disabled` suppresses it.
+```go
+type ValidateRequest struct {
+    Email string `json:"email" validate:"required,minlen=3,maxlen=255"`
+    Age   int    `json:"age"   validate:"required,min=18,max=120"`
+}
+type ValidateResponse struct {
+    OK         bool   `json:"ok"`
+    Normalized string `json:"normalized"`
+}
+
+zip.Post(app, "/v1/validate", func(ctx context.Context, in *ValidateRequest) (*ValidateResponse, error) {
+    return &ValidateResponse{OK: true, Normalized: strings.ToLower(in.Email)}, nil
+}, zip.WithSummary("Validate an email and age"), zip.WithTags("validation"))
+```
+
+Because `/mcp` is an ordinary route, it is served over every transport you `Listen` on — so **ZAP-native MCP is automatic**: an agent speaking ZAP gets the full tool surface with zero extra wiring. On by default; set `Config.MCP.Disabled` to suppress it. The op id (shared by OpenAPI and MCP so the two surfaces agree) defaults to method+path and is overridable with `zip.WithOperationID`.
 
 For a gRPC-style named-service surface on top, `zaprpc.Registry` + `zaprpc.HTTPHandler(reg)` exposes generated `zapc` services by name at a route.
 
+## Route precedence — the contract
+
+zip inherits its routing from the [`zap-proto/fiber`](/docs/fiber) fork, which makes precedence a property of the **pattern**, not of registration order. The rules mirror Go 1.22's `net/http.ServeMux`:
+
+- **Most specific pattern wins**, regardless of the order routes were registered: static literal ≻ `:param` ≻ `*` wildcard.
+- **More static structure wins.** A deeper static route beats a shallower wildcard; a longer literal breaks a static tie.
+- **Ambiguous equal-specificity overlap panics at startup**, naming both routes, instead of one silently shadowing the other.
+- **Constraint-typed params are exempt** from the conflict check — `:id<int>` and `:slug` match disjoint value sets, so they coexist in registration order.
+- **Middleware keeps declaration order.** `Use` and mounted sub-apps are precedence barriers; endpoints are sorted only within the run between barriers, so middleware always wraps the handlers that follow it.
+
+```go
+// Registration order is irrelevant — the static route always wins.
+app.Get("/v1/iam/*",    wildcard) // registered first
+app.Get("/v1/iam/keys", static)   // registered second
+
+// GET /v1/iam/keys          -> static
+// GET /v1/iam/anything-else -> wildcard
+```
+
+```go
+// The full ladder: static ≻ param ≻ wildcard, any registration order.
+app.Get("/users/*",   wildcard)
+app.Get("/users/:id", param)
+app.Get("/users/me",  static)
+
+// GET /users/me   -> static
+// GET /users/42   -> param
+// GET /users/a/b  -> wildcard
+```
+
+```go
+// Two distinct, equally specific, unconstrained patterns overlap with no winner.
+// This panics at registration, naming both — it never silently shadows.
+app.Get("/x/:id",   h1)
+app.Get("/x/:name", h2) // panic: route conflict (equal specificity, ambiguous match)
+```
+
+Method stacks are independent, so the same pattern on different methods never conflicts, and re-registering the *same* pattern merges handlers (both run) rather than shadowing. Routes added at runtime land in their correct precedence position after `RebuildTree`, not merely at the end. The contract is pinned by tests in both repos (`specificity_test.go` in zip, `router_precedence_test.go` in fiber). See [fiber](/docs/fiber) for the full rationale and the comparator.
+
+## Middleware
+
+Middleware is `zip.Handler` and runs in declaration order; a middleware body ends by calling `c.Continue()` to chain to the next handler. The `zip/middleware` package ships the common set:
+
+`Recover` · `RequestID` · `Logger` · `Timeout` · `MaxBody` · `CORS` · `RateLimit` · `Telemetry` · `Breaker` (circuit breaker).
+
+```go
+app.Use(
+    middleware.Recover(),
+    middleware.RequestID(),
+    middleware.CORS(middleware.CORSConfig{AllowOrigins: []string{"*"}}),
+)
+```
+
+Auth and identity-header handling (JWT validation, strip-and-mint of `X-*` identity headers) are the gateway's job, not the framework's — zip executes only the handler code its consumer registers. `app.UseFiber(...)` accepts raw `fiber.Handler` middleware for the `fiber/v3/middleware/*` packages when needed.
+
+## Runtime mounts — extension routes
+
+`app.Module` mounts a sandboxed extension as a route. The `"METHOD /path"` form matches the Sinatra idiom; the runtime selects the backing engine; the module path holds the extension manifest:
+
+```go
+app.Module("POST /v1/policy/eval", "wasm",     "./extensions/policy")
+app.Module("POST /v1/transform",   "pyvm",     "./extensions/transform")
+app.Module("POST /v1/webhook",     "goja",     "./extensions/webhook")
+```
+
+Supported runtimes: `wasm` · `goja` · `pyvm` · `starlark` · `v8go` · `native`. The host serializes one request envelope (`method`, `path`, `query`, `headers`, `body`, plus identity) and the guest returns a `{status, headers, body}` envelope — the same shape across every engine. Mounting requires a `Config.Loader`; the loader interface is duck-typed, so zip stays decoupled from any specific runtime implementation. `Config.AllowedRuntimes` restricts which engines a service will accept.
+
+A legacy TypeScript/JavaScript handler can also run in-process via the embedded JS runtime (`runtime.JSHandler` / `runtime.JSModule`) — goja executes the code (pure Go, no CGO) and esbuild transpiles TS ahead of it — so an Express-shaped `(req, res)` function becomes a route with no rewrite, then hot paths migrate to native Go one at a time.
+
 ## Composition: services are Mounts
 
-Services built on zip compose over `zip.App` with one contract:
+A service built on zip is a set of subsystem packages, each exposing one contract:
 
 ```go
 func Mount(app *zip.App, deps Deps) error
 ```
 
-Each subsystem is a package exposing `Mount`; a binary is a *selection* of subsystems mounted into one app. Migration is the same shape — `app.Mount("/legacy", chiRouter)` accepts any `http.Handler` (chi, gin, beego, `net/http`), so an existing service becomes a subsystem before it becomes ZAP-native.
+`Deps` is a typed dependency bag the binary builds once and threads through every `Mount`. A binary is a *selection* of subsystems mounted into one `App` and served by one `Listen` — so a standalone service and a fused multi-subsystem binary are the same code with a different selection. This scales: a production control plane composes tens of thousands of lines of subsystem code (identity, secrets, gateway, billing, AI, and more) over a compose root well under a thousand lines of zip — see the named adopters on [Ecosystem](/docs/ecosystem).
 
-### In production: one binary, 76:1
+Migration is the same shape. `app.Mount("/legacy", h)` accepts any `http.Handler` (chi, gin, beego, `net/http`), and `zip.AdaptNetHTTP` / `AdaptNetHTTPFunc` / `AdaptNetHTTPMiddleware` wrap standard handlers and middleware — so an existing service becomes a subsystem before it becomes ZAP-native. Adapters cost a few percent versus native dispatch; replace them with native handlers when feasible.
 
-The proof this scales is [hanzoai/cloud](https://github.com/hanzoai/cloud), the unified Hanzo control plane. Its compose root — subsystem registry, typed dependency bag, serve loop, subcommand dispatch — is **under 1,000 lines** of zip. Those lines host **~75,000 lines** of subsystem code (IAM, KMS, gateway, commerce, AI, and a dozen more), each mounted through the same `MountSpec{Name, Order, Mount}` registration. Roughly 76 lines of product for every line of framework shim.
+## JSON at the edge
 
-The same artifact is every standalone service *and* the fused control plane: `hanzo iam` serves one subsystem, `hanzo cloud` mounts them all — identical compose root, one listener, ZAP primary. The full stack story is in [Why ZAP](/docs/why-zap#zap-only-in-production).
+Every JSON path — `c.JSON`, `Bind`, the typed round-trip, the module envelope, the OpenAPI spec — goes through one internal helper. When the binary is compiled with `GOEXPERIMENT=jsonv2` (Go 1.25+) that helper is backed by the standard library's `encoding/json/v2`; otherwise it falls back to `encoding/json`. There is no third-party JSON library — stdlib only. `zip.JSONVariant` reports which implementation is active, and `zip.New` logs it once at startup. JSON is the edge format; between subsystems you pass ZAP-typed Go values.
 
-## Everything else in the box
+## Install and versioning
 
-- **Identity built-in** — `c.Org()` / `c.User()` / `c.UserEmail()` read gateway-minted, JWT-validated identity headers; handlers never parse tokens.
-- **WebSocket** — `wsx.Upgrade(fn)` via fasthttp/websocket.
-- **SSE / streaming** — `c.SendStreamWriter`, and streaming over the ZAP transport through the framework (zap-proto/http v0.2.0).
-- **Extension routes** — `app.Module("POST /v1/eval", "wasm", "./policy")` mounts a sandboxed extension (wasm, goja, starlark, native) as a route.
-- **Embedded JS/TS runtime** — `runtime.JSHandler` runs an Express-shaped JS function in-process via goja (pure Go, no CGO); TS is transpiled with esbuild.
-- **Stdlib JSON only** — every JSON path goes through one internal helper backed by `encoding/json/v2` where available; no third-party JSON library.
+```bash
+go get github.com/zap-proto/zip
+```
+
+Module path `github.com/zap-proto/zip`; released on semver tags (`vX.Y.Z`). It builds on `github.com/zap-proto/fiber/v3` (the routing engine) and `github.com/zap-proto/go` + `github.com/zap-proto/http` (the ZAP transport family). Requires Go 1.26+. Licensed **MIT**.
 
 ## Related
 
-- [Tools](/docs/tools) — generate the typed services zip serves
+- [fiber](/docs/fiber) — the routing engine zip is built on, and its precedence rules
+- [Transports](/docs/transports) — ZAP as the native wire, HTTP as the bridge
 - [HTTP over ZAP](/docs/protocols/http) — the transport zip's HTTP adapter and ZAP primary share
+- [MCP](/docs/protocols/mcp) — the tool surface every typed route projects
 - [Gateway](/docs/gateway) — the edge in front of a zip fleet
 - [Ecosystem](/docs/ecosystem) — who runs zip in production
